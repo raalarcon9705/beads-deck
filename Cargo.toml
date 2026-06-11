@@ -1,0 +1,27 @@
+[package]
+name = "beads-deck"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight native dashboard for the beads (bd) issue tracker — full custom-state, type, comment, dependency and history support."
+license = "MIT"
+repository = "https://github.com/raalarcon9705/beads-deck"
+homepage = "https://github.com/raalarcon9705/beads-deck"
+readme = "README.md"
+keywords = ["beads", "issue-tracker", "kanban", "egui", "tui"]
+categories = ["command-line-utilities", "gui"]
+authors = ["raalarcon9705"]
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+eframe = "0.29"
+egui = "0.29"
+egui_commonmark = { version = "0.18", features = ["load-images", "svg"] }
+egui_extras = { version = "0.29", features = ["all_loaders"] }
+resvg = "0.47.0"
+rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 2
+strip = true
