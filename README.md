@@ -42,6 +42,31 @@ workspace, so custom statuses and `initech` agents just show up.
 
 ## Install
 
+### Prebuilt binaries
+
+Each tagged release publishes binaries for macOS (Apple Silicon + Intel), Linux (x86_64) and
+Windows (x86_64) on the [Releases page](https://github.com/raalarcon9705/beads-deck/releases).
+Download the archive for your platform, extract, and put `beads-deck` on your `PATH`:
+
+```bash
+# macOS (Apple Silicon) example
+curl -fsSL https://github.com/raalarcon9705/beads-deck/releases/latest/download/beads-deck-aarch64-apple-darwin.tar.gz | tar -xz
+mv beads-deck ~/.local/bin/
+```
+
+### macOS app (Launchpad + Spotlight)
+
+To get a real `.app` in **Applications / Launchpad** and make it searchable with **Cmd+Space**:
+
+```bash
+./scripts/make-macos-app.sh
+```
+
+This builds the release binary, generates the `.icns` icon from `assets/logo.svg`, assembles
+`Beads Deck.app` (with `Info.plist`), ad-hoc signs it, installs it to `/Applications` (falls back
+to `~/Applications`), and refreshes Launch Services / Spotlight. Then just press **Cmd+Space** and
+type "Beads Deck".
+
 ### Homebrew
 
 ```bash
