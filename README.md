@@ -79,13 +79,15 @@ Or pin to the latest commit:
 brew install --HEAD https://raw.githubusercontent.com/raalarcon9705/beads-deck/main/Formula/beads-deck.rb
 ```
 
-### install.sh (build from source)
+### install.sh
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/raalarcon9705/beads-deck/main/install.sh | bash
 ```
 
-Installs to `~/.local/bin` by default (override with `PREFIX=/usr/local/bin`). Requires Rust (`cargo`).
+Downloads the **prebuilt binary** for your platform from the latest release and installs it to
+`~/.local/bin` (override with `PREFIX=/usr/local/bin`). On unsupported platforms — or with
+`BEADS_DECK_FROM_SOURCE=1` — it **builds from source** instead (requires Rust).
 
 ### From source
 
