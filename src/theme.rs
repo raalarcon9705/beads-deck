@@ -271,6 +271,21 @@ pub fn bead_link(ui: &mut Ui, id: &str) -> bool {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
+/// Render a bead id as a monospace label that copies the id to the clipboard
+/// when clicked (with a hover hint).
+pub fn copyable_id(ui: &mut Ui, id: &str, size: f32) {
+    let resp = ui
+        .add(
+            egui::Label::new(RichText::new(id).monospace().size(size).color(pal().text_sub))
+                .sense(egui::Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Click to copy id");
+    if resp.clicked() {
+        ui.output_mut(|o| o.copied_text = id.to_string());
+    }
+}
+
 pub fn status_lozenge(ui: &mut Ui, status: &str) {
     let s = status_style(status);
     lozenge(ui, &s.label, s.fg, s.bg);

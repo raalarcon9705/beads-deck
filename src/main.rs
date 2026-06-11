@@ -1277,7 +1277,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let (glyph, tc) = t::type_glyph(&i.issue_type);
                     ui.label(RichText::new(glyph).color(tc));
-                    ui.label(RichText::new(&i.id).monospace().size(t::FS_CAPTION).color(p.text_sub));
+                    t::copyable_id(ui, &i.id, t::FS_CAPTION);
                     t::priority_lozenge(ui, i.priority);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(a) = i.assignee.as_deref().filter(|a| !a.is_empty()) {
@@ -1611,7 +1611,7 @@ impl App {
                     ui.label(RichText::new(glyph).color(tc));
                     t::priority_lozenge(ui, i.priority);
                     t::status_lozenge(ui, &i.status);
-                    ui.label(RichText::new(&i.id).monospace().size(t::FS_CAPTION).color(p.text_sub));
+                    t::copyable_id(ui, &i.id, t::FS_CAPTION);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(a) = i.assignee.as_deref().filter(|a| !a.is_empty()) {
                             t::avatar(ui, a, 20.0);
@@ -1684,7 +1684,7 @@ impl App {
         ui.horizontal(|ui| {
             let (glyph, tc) = t::type_glyph(&i.issue_type);
             ui.label(RichText::new(glyph).size(t::FS_H1).color(tc));
-            ui.label(RichText::new(&i.id).monospace().size(t::FS_BODY).color(p.text_sub));
+            t::copyable_id(ui, &i.id, t::FS_BODY);
             if let Some(par) = &i.parent {
                 ui.label(RichText::new("\u{2191}").size(t::FS_SMALL).color(p.text_sub));
                 if t::bead_link(ui, par) {
@@ -2066,7 +2066,7 @@ fn agent_card(ui: &mut egui::Ui, c: &AgentCard, now: DateTime<Utc>, removable: b
                         }
                     });
                     if !c.bead.is_empty() {
-                        ui.label(RichText::new(&c.bead).monospace().size(t::FS_CAPTION).color(p.text_sub));
+                        t::copyable_id(ui, &c.bead, t::FS_CAPTION);
                         ui.add(egui::Label::new(RichText::new(&c.title).size(t::FS_SMALL).color(p.text)).truncate());
                     }
                     ui.label(RichText::new(&c.action).size(t::FS_CAPTION).color(p.text_sub));
@@ -2111,14 +2111,7 @@ fn pipeline_card(ui: &mut egui::Ui, c: &PipeCard) -> bool {
                     }
                     ui.add_space(2.0);
                     for s in &c.samples {
-                        let r = ui.add(
-                            egui::Label::new(RichText::new(s).monospace().size(t::FS_CAPTION).color(p.text_sub))
-                                .truncate()
-                                .sense(egui::Sense::click()),
-                        );
-                        if r.clicked() {
-                            clicked = true;
-                        }
+                        t::copyable_id(ui, s, t::FS_CAPTION);
                     }
                     if c.more > 0 {
                         ui.label(RichText::new(format!("+{} more", c.more)).size(t::FS_CAPTION).color(p.text_sub));
