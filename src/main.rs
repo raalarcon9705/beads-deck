@@ -27,6 +27,21 @@ fn is_backlog(i: &Issue) -> bool {
     !is_archived(i) && i.priority == 4
 }
 
+/// Label prefix that marks a bead as belonging to a release/milestone, e.g.
+/// `release:v0.3.0`. Releases are modelled as labels (orthogonal to the
+/// single-parent epic hierarchy) so a bead can be in a release AND an epic.
+const RELEASE_PREFIX: &str = "release:";
+
+/// The release a bead belongs to (the text after `release:`), if any.
+fn release_of(i: &Issue) -> Option<&str> {
+    i.labels.iter().find_map(|l| l.strip_prefix(RELEASE_PREFIX)).filter(|s| !s.is_empty())
+}
+
+/// A bead counts as shipped when bd considers it closed.
+fn is_closed(i: &Issue) -> bool {
+    i.status == "closed" || i.closed_at.is_some()
+}
+
 const STATUS_ORDER: &[&str] = &[
     "open",
     "in_progress",
@@ -178,6 +193,7 @@ enum Msg {
 enum View {
     Board,
     Tree,
+    Releases,
     Activity,
 }
 
@@ -202,6 +218,8 @@ enum BeadAction {
     Assignee(Option<String>),
     ArchiveToggle(bool),
     Backlog,
+    /// Move the bead to a release (Some) or clear its release (None).
+    SetRelease(Option<String>),
     Delete,
 }
 
@@ -234,6 +252,15 @@ struct App {
     nb_priority: i64,
     nb_assignee: Option<String>,
     nb_parent: String,
+    nb_release: String,
+    /// Free-text buffer for creating a new release from the detail panel.
+    release_buf: String,
+    /// Whether the inline "new release" entry is showing in the detail panel.
+    adding_release: bool,
+    /// One-shot: request focus on the new-release field on the next frame.
+    focus_release: bool,
+    /// Release name pending "convert to epic" confirmation.
+    confirm_convert: Option<String>,
     list_error: Option<String>,
     loading_list: bool,
 
@@ -261,6 +288,7 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        t::install_fonts(&cc.egui_ctx);
         t::apply(&cc.egui_ctx, false);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let (tx, rx) = channel();
@@ -303,6 +331,11 @@ impl App {
             nb_priority: 2,
             nb_assignee: None,
             nb_parent: String::new(),
+            nb_release: String::new(),
+            release_buf: String::new(),
+            adding_release: false,
+            focus_release: false,
+            confirm_convert: None,
             list_error: None,
             loading_list: false,
             search: String::new(),
@@ -454,9 +487,10 @@ impl App {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.add_path)
                             .hint_text("~/Projects/my-project")
-                            .desired_width(360.0),
+                            .desired_width(360.0)
+                            .min_size(egui::vec2(0.0, t::CONTROL_H)).vertical_align(egui::Align::Center),
                     );
-                    if ui.button("\u{1F4C1}").on_hover_text("Browse…").clicked() {
+                    if ui.button(t::ic::FOLDER).on_hover_text("Browse…").clicked() {
                         let mut dialog = rfd::FileDialog::new();
                         if let Ok(home) = std::env::var("HOME") {
                             dialog = dialog.set_directory(home);
@@ -533,6 +567,27 @@ impl App {
         thread::spawn(move || {
             let error = bd::run_cmd(&ws, &program, &args).err();
             let _ = tx.send(Msg::Mutated { reselect, error, optimistic: false });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Reassign a bead's release label: drop the old `release:` label (if any)
+    /// then add the new one. Both run in one background thread, then refresh.
+    fn set_release(&self, id: &str, current: Option<String>, new: Option<String>) {
+        let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
+        let id = id.to_string();
+        thread::spawn(move || {
+            let error = (|| {
+                if let Some(cur) = &current {
+                    bd::run_cmd(&ws, "bd", &["label".into(), "remove".into(), id.clone(), format!("{RELEASE_PREFIX}{cur}")])?;
+                }
+                if let Some(n) = &new {
+                    bd::run_cmd(&ws, "bd", &["label".into(), "add".into(), id.clone(), format!("{RELEASE_PREFIX}{n}")])?;
+                }
+                Ok::<_, String>(())
+            })()
+            .err();
+            let _ = tx.send(Msg::Mutated { reselect: Some(id), error, optimistic: false });
             ctx.request_repaint();
         });
     }
@@ -728,6 +783,49 @@ impl App {
         set
     }
 
+    /// Distinct release names present across all loaded beads (sorted).
+    fn releases(&self) -> Vec<String> {
+        let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for i in &self.issues {
+            if let Some(r) = release_of(i) {
+                set.insert(r.to_string());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Convert a release into an epic: create the epic, then reparent every bead
+    /// carrying `release:<name>` under it. The release label is kept, so the
+    /// release grouping and the epic coexist. Runs in a background thread.
+    fn convert_release(&self, release: String) {
+        let ids: Vec<String> = self
+            .issues
+            .iter()
+            .filter(|i| release_of(i) == Some(release.as_str()))
+            .map(|i| i.id.clone())
+            .collect();
+        let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
+        thread::spawn(move || {
+            let error = (|| {
+                let epic = bd::create_epic(&ws, &release, &[format!("{RELEASE_PREFIX}{release}")])?;
+                if !ids.is_empty() {
+                    let mut args: Vec<String> = vec!["update".into()];
+                    args.extend(ids);
+                    args.push("--parent".into());
+                    args.push(epic.clone());
+                    bd::run_cmd(&ws, "bd", &args)?;
+                }
+                Ok::<_, String>(epic)
+            })();
+            let (reselect, error) = match error {
+                Ok(epic) => (Some(epic), None),
+                Err(e) => (None, Some(e)),
+            };
+            let _ = tx.send(Msg::Mutated { reselect, error, optimistic: false });
+            ctx.request_repaint();
+        });
+    }
+
     /// Unique assignees present in the loaded beads (sorted).
     fn assignees(&self) -> Vec<String> {
         let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -772,7 +870,7 @@ impl eframe::App for App {
             egui::TopBottomPanel::top("err")
                 .frame(egui::Frame::none().fill(p.red_t).inner_margin(Margin::symmetric(12.0, 6.0)))
                 .show(ctx, |ui| {
-                    ui.colored_label(p.red_d, format!("\u{26A0} {err}"));
+                    ui.colored_label(p.red_d, format!("{} {err}", t::ic::WARNING));
                 });
         }
 
@@ -788,10 +886,12 @@ impl eframe::App for App {
             .show(ctx, |ui| match self.view {
                 View::Tree => self.tree_view(ui),
                 View::Board => self.board_view(ui),
+                View::Releases => self.releases_view(ui),
                 View::Activity => self.activity_view(ui),
             });
 
         self.confirm_delete_modal(ctx);
+        self.confirm_convert_modal(ctx);
         self.confirm_delete_agent_modal(ctx);
         if self.show_add_agent {
             self.add_agent_modal(ctx);
@@ -826,7 +926,7 @@ impl App {
                     ui.label(RichText::new(s).size(t::FS_CAPTION).strong().color(p.text_sub));
                 };
                 cap(ui, "Title");
-                ui.add(egui::TextEdit::singleline(&mut self.nb_title).hint_text("Short summary").desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::singleline(&mut self.nb_title).hint_text("Short summary").desired_width(f32::INFINITY).min_size(egui::vec2(0.0, t::CONTROL_H)).vertical_align(egui::Align::Center));
                 ui.add_space(t::SP_SM);
 
                 egui::Grid::new("nb_grid")
@@ -886,6 +986,15 @@ impl App {
                                 }
                             });
                         ui.end_row();
+
+                        cap(ui, "Release");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.nb_release)
+                                .hint_text("e.g. v0.3.0 (optional)")
+                                .desired_width(FIELD_W)
+                                .min_size(egui::vec2(0.0, t::CONTROL_H)).vertical_align(egui::Align::Center),
+                        );
+                        ui.end_row();
                     });
 
                 ui.add_space(t::SP_SM);
@@ -938,12 +1047,17 @@ impl App {
                 args.push("-d".into());
                 args.push(self.nb_desc.trim().to_string());
             }
+            if !self.nb_release.trim().is_empty() {
+                args.push("--labels".into());
+                args.push(format!("{RELEASE_PREFIX}{}", self.nb_release.trim()));
+            }
             self.run_cmd("bd", args, None);
             // reset form
             self.show_add_bead = false;
             self.nb_title.clear();
             self.nb_desc.clear();
             self.nb_parent.clear();
+            self.nb_release.clear();
             self.nb_assignee = None;
             self.nb_type = "task".into();
             self.nb_priority = 2;
@@ -984,6 +1098,54 @@ impl App {
             self.selected = None;
             self.detail = None;
             self.run_cmd("bd", vec!["delete".into(), id], None);
+        }
+    }
+
+    fn confirm_convert_modal(&mut self, ctx: &egui::Context) {
+        let Some(release) = self.confirm_convert.clone() else { return };
+        let p = t::pal();
+        let count = self
+            .issues
+            .iter()
+            .filter(|i| release_of(i) == Some(release.as_str()))
+            .count();
+        let (mut yes, mut no) = (false, false);
+        egui::Window::new(RichText::new("Convert release to epic?").strong())
+            .collapsible(false)
+            .resizable(false)
+            .auto_sized()
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Create an epic \u{201C}{release}\u{201D} and reparent its {count} bead(s) under it. \
+                         Beads already in another epic will be moved to the new one. \
+                         The {RELEASE_PREFIX}{release} label is kept."
+                    ))
+                    .color(p.text_sub),
+                );
+                ui.add_space(t::SP_MD);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("Convert").color(egui::Color32::WHITE)).fill(p.green))
+                            .clicked()
+                        {
+                            yes = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            no = true;
+                        }
+                    });
+                });
+            });
+        if no {
+            self.confirm_convert = None;
+        }
+        if yes {
+            self.confirm_convert = None;
+            self.convert_release(release);
         }
     }
 
@@ -1032,7 +1194,7 @@ impl App {
                 ui.set_width(380.0);
                 ui.label(RichText::new("Role name (e.g. eng3, qa3, ops) — scaffolds a workspace and registers it in initech.yaml.").color(p.text_sub));
                 ui.add_space(t::SP_MD);
-                ui.add(egui::TextEdit::singleline(&mut self.add_agent_name).hint_text("eng3").desired_width(340.0));
+                ui.add(egui::TextEdit::singleline(&mut self.add_agent_name).hint_text("eng3").desired_width(340.0).min_size(egui::vec2(0.0, t::CONTROL_H)).vertical_align(egui::Align::Center));
                 ui.add_space(t::SP_XS);
                 ui.checkbox(&mut self.add_agent_custom, "Custom role (skip catalog check)");
                 if let Some(err) = self.action_error.clone() {
@@ -1080,7 +1242,7 @@ impl App {
             .frame(egui::Frame::none().fill(p.surface).inner_margin(Margin::symmetric(12.0, 8.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("\u{2190} Back").on_hover_text(&self.workspace).clicked() {
+                    if ui.button(format!("{} Back", t::ic::BACK)).on_hover_text(&self.workspace).clicked() {
                         self.go_back();
                     }
                     ui.add_space(t::SP_SM);
@@ -1095,12 +1257,12 @@ impl App {
                         self.show_add_bead = true;
                         self.action_error = None;
                     }
-                    if ui.button("\u{27F3} Reload").clicked() {
+                    if ui.button(format!("{} Reload", t::ic::RELOAD)).clicked() {
                         self.reload();
                     }
                     let live_color = if self.live { p.green } else { p.text_sub };
                     if ui
-                        .selectable_label(self.live, RichText::new("\u{25CF} Live").color(live_color))
+                        .selectable_label(self.live, RichText::new(format!("{} Live", t::ic::LIVE)).color(live_color))
                         .clicked()
                     {
                         self.live = !self.live;
@@ -1112,19 +1274,20 @@ impl App {
                         // Theme selector
                         egui::ComboBox::from_id_salt("theme")
                             .selected_text(match self.theme_mode {
-                                ThemeMode::Auto => "\u{1F5A5} Auto",
-                                ThemeMode::Light => "\u{2600} Light",
-                                ThemeMode::Dark => "\u{1F319} Dark",
+                                ThemeMode::Auto => format!("{} Auto", t::ic::DESKTOP),
+                                ThemeMode::Light => format!("{} Light", t::ic::SUN),
+                                ThemeMode::Dark => format!("{} Dark", t::ic::MOON),
                             })
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.theme_mode, ThemeMode::Auto, "\u{1F5A5} Auto");
-                                ui.selectable_value(&mut self.theme_mode, ThemeMode::Light, "\u{2600} Light");
-                                ui.selectable_value(&mut self.theme_mode, ThemeMode::Dark, "\u{1F319} Dark");
+                                ui.selectable_value(&mut self.theme_mode, ThemeMode::Auto, format!("{} Auto", t::ic::DESKTOP));
+                                ui.selectable_value(&mut self.theme_mode, ThemeMode::Light, format!("{} Light", t::ic::SUN));
+                                ui.selectable_value(&mut self.theme_mode, ThemeMode::Dark, format!("{} Dark", t::ic::MOON));
                             });
                         ui.separator();
-                        ui.selectable_value(&mut self.view, View::Activity, "\u{1F4C8} Activity");
-                        ui.selectable_value(&mut self.view, View::Tree, "\u{1F333} Tree");
-                        ui.selectable_value(&mut self.view, View::Board, "\u{25A6} Board");
+                        ui.selectable_value(&mut self.view, View::Activity, format!("{} Activity", t::ic::ACTIVITY));
+                        ui.selectable_value(&mut self.view, View::Releases, format!("{} Releases", t::ic::RELEASE));
+                        ui.selectable_value(&mut self.view, View::Tree, format!("{} Tree", t::ic::TREE));
+                        ui.selectable_value(&mut self.view, View::Board, format!("{} Board", t::ic::BOARD));
                         ui.separator();
                         ui.label(RichText::new(format!("{} beads", self.issues.len())).color(p.text_sub));
                     });
@@ -1140,7 +1303,7 @@ impl App {
                         .inner_margin(Margin::symmetric(8.0, 4.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("\u{1F50E}").color(p.text_sub));
+                                ui.label(RichText::new(t::ic::SEARCH).color(p.text_sub));
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.search)
                                         .hint_text("Search by title or ID…")
@@ -1194,7 +1357,7 @@ impl App {
                         });
 
                     ui.add_space(t::SP_SM);
-                    ui.label(RichText::new("\u{21C5}").color(p.text_sub));
+                    ui.label(RichText::new(t::ic::SORT).color(p.text_sub));
                     egui::ComboBox::from_id_salt("sort")
                         .width(170.0)
                         .selected_text(self.sort.label())
@@ -1368,10 +1531,10 @@ impl App {
                         }
                         t::priority_lozenge(ui, i.priority);
                         if i.comment_count > 0 {
-                            ui.label(RichText::new(format!("\u{1F4AC}{}", i.comment_count)).size(t::FS_CAPTION).color(p.text_sub));
+                            ui.label(RichText::new(format!("{}{}", t::ic::COMMENT, i.comment_count)).size(t::FS_CAPTION).color(p.text_sub));
                         }
                         if i.dependency_count > 0 {
-                            ui.label(RichText::new(format!("\u{26D4}{}", i.dependency_count)).size(t::FS_CAPTION).color(p.text_sub));
+                            ui.label(RichText::new(format!("{}{}", t::ic::BLOCKED, i.dependency_count)).size(t::FS_CAPTION).color(p.text_sub));
                         }
                     });
                 });
@@ -1651,24 +1814,24 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
 
-                        tree_group(ui, "\u{1F5C2}", "Epics", epics_n, true, |ui| {
+                        tree_group(ui, t::ic::EPICS, "Epics", epics_n, true, |ui| {
                             for &r in &epic_roots {
                                 self.tree_node(ui, r, &children, &mut clicked);
                             }
                         });
-                        tree_group(ui, "\u{2B1A}", "Loose Beads", loose_n, false, |ui| {
+                        tree_group(ui, t::ic::LOOSE, "Loose Beads", loose_n, false, |ui| {
                             for &r in &loose_roots {
                                 self.tree_node(ui, r, &children, &mut clicked);
                             }
                         });
-                        tree_group(ui, "\u{1F4E5}", "Backlog", backlog_n, false, |ui| {
+                        tree_group(ui, t::ic::BACKLOG, "Backlog", backlog_n, false, |ui| {
                             for &i in &backlog {
                                 if self.passes_filter(&self.issues[i]) && self.tree_row(ui, &self.issues[i]) {
                                     clicked = Some(self.issues[i].id.clone());
                                 }
                             }
                         });
-                        tree_group(ui, "\u{1F5C4}", "Archived", archived_n, false, |ui| {
+                        tree_group(ui, t::ic::ARCHIVE, "Archived", archived_n, false, |ui| {
                             for &i in &archived {
                                 if self.passes_filter(&self.issues[i]) && self.tree_row(ui, &self.issues[i]) {
                                     clicked = Some(self.issues[i].id.clone());
@@ -1748,7 +1911,7 @@ impl App {
                             t::avatar(ui, a, 20.0);
                         }
                         if i.comment_count > 0 {
-                            ui.label(RichText::new(format!("\u{1F4AC}{}", i.comment_count)).size(t::FS_CAPTION).color(p.text_sub));
+                            ui.label(RichText::new(format!("{}{}", t::ic::COMMENT, i.comment_count)).size(t::FS_CAPTION).color(p.text_sub));
                         }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.add(egui::Label::new(RichText::new(&i.title).color(p.text)).truncate());
@@ -1772,6 +1935,106 @@ impl App {
     }
 
     // ---- Detail ----
+    // ---- Releases ----
+    /// Beads grouped by their `release:` label. Each release shows a shipped/total
+    /// progress and a "convert to epic" action. Beads with no release label fall
+    /// into a trailing "No release" group.
+    fn releases_view(&mut self, ui: &mut egui::Ui) {
+        let p = t::pal();
+        // Bucket indices: one slot per release (sorted), plus a trailing None slot.
+        let mut groups: Vec<(Option<String>, Vec<usize>)> =
+            self.releases().into_iter().map(|r| (Some(r), Vec::new())).collect();
+        groups.push((None, Vec::new()));
+        for (idx, i) in self.issues.iter().enumerate() {
+            let rel = release_of(i).map(str::to_string);
+            let slot = match &rel {
+                Some(r) => groups.iter_mut().find(|(g, _)| g.as_deref() == Some(r.as_str())),
+                None => groups.last_mut(),
+            };
+            if let Some((_, v)) = slot {
+                v.push(idx);
+            }
+        }
+
+        let mut clicked: Option<String> = None;
+        let mut convert: Option<String> = None;
+        egui::Frame::none()
+            .fill(p.surface)
+            .rounding(Rounding::same(t::R_LG))
+            .stroke(egui::Stroke::new(1.0, p.border))
+            .inner_margin(Margin::same(t::SP_SM))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+
+                        if self.releases().is_empty() {
+                            ui.add_space(t::SP_MD);
+                            ui.label(RichText::new("No releases yet.").strong().color(p.text));
+                            ui.label(
+                                RichText::new(format!(
+                                    "Tag beads with a `{RELEASE_PREFIX}<name>` label (from the detail panel) to group them here."
+                                ))
+                                .size(t::FS_CAPTION)
+                                .color(p.text_sub),
+                            );
+                            return;
+                        }
+
+                        for (rel, idxs) in &groups {
+                            let visible = self.apply_sort(
+                                idxs.iter()
+                                    .copied()
+                                    .filter(|&i| self.passes_filter(&self.issues[i]))
+                                    .collect(),
+                            );
+                            // Skip an empty "No release" bucket; always show named releases.
+                            if visible.is_empty() && rel.is_none() {
+                                continue;
+                            }
+                            let total = idxs.len();
+                            let shipped = idxs.iter().filter(|&&i| is_closed(&self.issues[i])).count();
+                            let (icon, name) = match rel {
+                                Some(r) => (t::ic::RELEASE, r.clone()),
+                                None => ("\u{2014}", "No release".to_string()),
+                            };
+                            let header = format!("{icon}   {name}   \u{2014}  {shipped}/{total} shipped");
+                            ui.add_space(2.0);
+                            egui::CollapsingHeader::new(
+                                RichText::new(header).strong().size(t::FS_SMALL).color(p.text_sub),
+                            )
+                            .id_salt(rel.clone().unwrap_or_else(|| "\u{0}none".into()))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                if let Some(r) = rel {
+                                    if ui
+                                        .button(RichText::new(format!("{} Convert to epic", t::ic::ARROW_RIGHT)).size(t::FS_CAPTION))
+                                        .on_hover_text("Create an epic and reparent every bead in this release under it")
+                                        .clicked()
+                                    {
+                                        convert = Some(r.clone());
+                                    }
+                                    ui.add_space(t::SP_XS);
+                                }
+                                for &i in &visible {
+                                    if self.tree_row(ui, &self.issues[i]) {
+                                        clicked = Some(self.issues[i].id.clone());
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+
+        if let Some(id) = clicked {
+            self.select(id);
+        }
+        if let Some(r) = convert {
+            self.confirm_convert = Some(r);
+        }
+    }
+
     fn detail_panel(&mut self, ui: &mut egui::Ui) {
         let p = t::pal();
         // Always claim the full panel width so narrow states (spinner / empty)
@@ -1794,7 +2057,7 @@ impl App {
             return;
         }
         if let Some(err) = self.detail_error.clone() {
-            ui.colored_label(p.red_d, format!("\u{26A0} {err}"));
+            ui.colored_label(p.red_d, format!("{} {err}", t::ic::WARNING));
             return;
         }
         let Some(i) = self.detail.clone() else { return };
@@ -1809,6 +2072,13 @@ impl App {
             }
         }
         let roster = self.agent_roster();
+        let releases = self.releases();
+        let cur_release = release_of(&i).map(str::to_string);
+        // Editable outside self so the combo closure can borrow it freely.
+        let mut release_buf = std::mem::take(&mut self.release_buf);
+        let mut adding_release = self.adding_release;
+        let focus_new_release = std::mem::take(&mut self.focus_release);
+        let mut request_focus_next = false;
         let archived_now = is_archived(&i);
         let backlog_now = is_backlog(&i);
 
@@ -1817,23 +2087,23 @@ impl App {
             ui.label(RichText::new(glyph).size(t::FS_H1).color(tc));
             t::copyable_id(ui, &i.id, t::FS_BODY);
             if let Some(par) = &i.parent {
-                ui.label(RichText::new("\u{2191}").size(t::FS_SMALL).color(p.text_sub));
+                ui.label(RichText::new(t::ic::PARENT).size(t::FS_SMALL).color(p.text_sub));
                 if t::bead_link(ui, par) {
                     nav = Some(par.clone());
                 }
             }
             // Action buttons pinned right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("\u{1F5D1}").on_hover_text("Delete bead").clicked() {
+                if ui.button(t::ic::DELETE).on_hover_text("Delete bead").clicked() {
                     action = Some(BeadAction::Delete);
                 }
-                let arch_label = if archived_now { "\u{21A9}" } else { "\u{1F5C4}" };
+                let arch_label = if archived_now { t::ic::UNARCHIVE } else { t::ic::ARCHIVE };
                 let arch_hint = if archived_now { "Unarchive" } else { "Archive bead" };
                 if ui.button(arch_label).on_hover_text(arch_hint).clicked() {
                     action = Some(BeadAction::ArchiveToggle(archived_now));
                 }
                 if !backlog_now
-                    && ui.button("\u{1F4E5}").on_hover_text("Move to backlog (P4)").clicked()
+                    && ui.button(t::ic::BACKLOG).on_hover_text("Move to backlog (P4)").clicked()
                 {
                     action = Some(BeadAction::Backlog);
                 }
@@ -1880,12 +2150,60 @@ impl App {
                         }
                     }
                 });
+            let rel_text = cur_release.clone().unwrap_or_else(|| "No release".to_string());
+            egui::ComboBox::from_id_salt("d_release")
+                .selected_text(RichText::new(format!("{} {rel_text}", t::ic::RELEASE)))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(cur_release.is_none(), "No release").clicked()
+                        && cur_release.is_some()
+                    {
+                        action = Some(BeadAction::SetRelease(None));
+                    }
+                    for r in &releases {
+                        if ui.selectable_label(cur_release.as_deref() == Some(r), r.as_str()).clicked()
+                            && cur_release.as_deref() != Some(r)
+                        {
+                            action = Some(BeadAction::SetRelease(Some(r.clone())));
+                        }
+                    }
+                });
+            // Inline "new release" entry, kept OUTSIDE the combo popup (a TextEdit
+            // inside it would close the popup on focus). Natural sizing keeps the
+            // field and its buttons at the same height as the combos.
+            if adding_release {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut release_buf)
+                        .hint_text("New release…")
+                        .desired_width(140.0)
+                        .min_size(egui::vec2(0.0, t::CONTROL_H)).vertical_align(egui::Align::Center),
+                );
+                if focus_new_release {
+                    resp.request_focus();
+                }
+                let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let add = ui.button(t::ic::CHECK).on_hover_text("Add release").clicked();
+                let cancel = ui.button(t::ic::CLOSE).on_hover_text("Cancel").clicked();
+                if (add || submit) && !release_buf.trim().is_empty() {
+                    action = Some(BeadAction::SetRelease(Some(release_buf.trim().to_string())));
+                    release_buf.clear();
+                    adding_release = false;
+                } else if cancel {
+                    release_buf.clear();
+                    adding_release = false;
+                }
+            } else if ui.button(format!("{} New", t::ic::PLUS)).on_hover_text("Create a new release").clicked() {
+                adding_release = true;
+                request_focus_next = true;
+            }
             if archived_now {
                 t::lozenge(ui, "Archived", p.amber_d, p.yellow_t);
             }
         });
+        self.release_buf = release_buf;
+        self.adding_release = adding_release;
+        self.focus_release = request_focus_next;
         if let Some(err) = self.action_error.clone() {
-            ui.colored_label(p.red_d, format!("\u{26A0} {err}"));
+            ui.colored_label(p.red_d, format!("{} {err}", t::ic::WARNING));
         }
         ui.add_space(t::SP_SM);
         ui.separator();
@@ -1930,6 +2248,7 @@ impl App {
                 BeadAction::Assignee(Some(a)) => self.bd_update(&id, "--assignee", &a),
                 BeadAction::Assignee(None) => self.bd_update(&id, "--assignee", ""),
                 BeadAction::Backlog => self.bd_update(&id, "--priority", "4"),
+                BeadAction::SetRelease(new) => self.set_release(&id, cur_release.clone(), new),
                 BeadAction::ArchiveToggle(now) => {
                     let op = if now { "remove" } else { "add" };
                     self.run_cmd(
@@ -1964,11 +2283,11 @@ fn workspace_card(ui: &mut egui::Ui, name: &str, path: &str) -> Option<CardActio
                 ui.set_width(W - 24.0);
                 ui.set_min_height(84.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("\u{25CF}").size(10.0).color(p.text_sub));
+                    ui.label(RichText::new(t::ic::DOT).size(10.0).color(p.text_sub));
                     ui.label(RichText::new(name).strong().size(16.0).color(p.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Label::new(RichText::new("\u{00D7}").color(p.text_sub)).sense(egui::Sense::click()))
+                            .add(egui::Label::new(RichText::new(t::ic::CLOSE).color(p.text_sub)).sense(egui::Sense::click()))
                             .on_hover_text("Remove")
                             .clicked()
                         {
@@ -2135,7 +2454,7 @@ fn day_label(ts: DateTime<Utc>) -> String {
 
 fn event_action(e: &Interaction) -> String {
     match e.field() {
-        "status" => format!("\u{2192} {}", t::status_style(&e.new_value()).label),
+        "status" => format!("{} {}", t::ic::ARROW_RIGHT, t::status_style(&e.new_value()).label),
         "assignee" => {
             let v = e.new_value();
             if v.is_empty() {
@@ -2182,12 +2501,12 @@ fn agent_card(ui: &mut egui::Ui, c: &AgentCard, now: DateTime<Utc>, removable: b
                 .show(ui, |ui| {
                     ui.set_width(W - 22.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("\u{25CF}").size(9.0).color(if active { p.green } else { p.text_sub }));
+                        ui.label(RichText::new(t::ic::DOT).size(9.0).color(if active { p.green } else { p.text_sub }));
                         ui.label(RichText::new(&c.name).strong().color(p.text));
                         if removable {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui
-                                    .add(egui::Label::new(RichText::new("\u{00D7}").color(p.text_sub)).sense(egui::Sense::click()))
+                                    .add(egui::Label::new(RichText::new(t::ic::CLOSE).color(p.text_sub)).sense(egui::Sense::click()))
                                     .on_hover_text("Remove agent")
                                     .clicked()
                                 {
@@ -2261,7 +2580,7 @@ fn feed_row(ui: &mut egui::Ui, f: &FeedItem) -> bool {
         .inner_margin(Margin::symmetric(2.0, 3.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("\u{2192}").color(p.text_sub));
+                ui.label(RichText::new(t::ic::ARROW_RIGHT).color(p.text_sub));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(&f.ago).size(t::FS_CAPTION).color(p.text_sub));
                     ui.label(RichText::new(format!("({})", f.meta)).size(t::FS_CAPTION).color(p.text_sub));
@@ -2306,8 +2625,8 @@ fn detail_tab(ui: &mut egui::Ui, i: &Issue, md: &str, cache: &mut CommonMarkCach
     }
     t::section(ui, "Relations");
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("\u{26D4} Blocked by: {}", i.dependency_count)).color(p.text_sub));
-        ui.label(RichText::new(format!("\u{2192} Blocks: {}", i.dependent_count)).color(p.text_sub));
+        ui.label(RichText::new(format!("{} Blocked by: {}", t::ic::BLOCKED, i.dependency_count)).color(p.text_sub));
+        ui.label(RichText::new(format!("{} Blocks: {}", t::ic::ARROW_RIGHT, i.dependent_count)).color(p.text_sub));
     });
     if let (Some(c), Some(reason)) = (&i.closed_at, &i.close_reason) {
         t::section(ui, "Resolution");

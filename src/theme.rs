@@ -138,6 +138,10 @@ pub const SP_SM: f32 = 8.0;
 pub const SP_MD: f32 = 12.0;
 pub const SP_LG: f32 = 16.0;
 
+/// Shared height for interactive controls (buttons, combo boxes, text inputs)
+/// so they align on a single row.
+pub const CONTROL_H: f32 = 24.0;
+
 pub const R_SM: f32 = 3.0;
 pub const R_MD: f32 = 6.0;
 pub const R_LG: f32 = 8.0;
@@ -219,16 +223,16 @@ pub fn priority_style(prio: i64) -> Style {
     Style { label: format!("P{prio}"), fg, bg }
 }
 
-/// Bead type → (emoji glyph, accent color).
+/// Bead type → (icon glyph, accent color).
 pub fn type_glyph(ty: &str) -> (&'static str, Color32) {
     let p = pal();
     match ty {
-        "epic" => ("\u{1F451}", p.purple),
-        "feature" => ("\u{2728}", p.green),
-        "task" => ("\u{2611}", p.blue),
-        "bug" => ("\u{1F41E}", p.red),
-        "chore" => ("\u{1F527}", p.muted),
-        _ => ("\u{2022}", p.muted),
+        "epic" => (ic::EPIC, p.purple),
+        "feature" => (ic::FEATURE, p.green),
+        "task" => (ic::TASK, p.blue),
+        "bug" => (ic::BUG, p.red),
+        "chore" => (ic::CHORE, p.muted),
+        _ => (ic::DOT, p.muted),
     }
 }
 
@@ -353,6 +357,29 @@ pub fn section(ui: &mut Ui, title: &str) {
     ui.add_space(2.0);
 }
 
+/// Semantic icon aliases over the Phosphor icon font. Using a font (rather than
+/// raw emoji codepoints) guarantees every glyph renders consistently across
+/// platforms and aligns to the text baseline like any other character.
+pub mod ic {
+    pub use egui_phosphor::regular::{
+        ARCHIVE, ARROWS_DOWN_UP as SORT, ARROW_CLOCKWISE as RELOAD, ARROW_LEFT as BACK,
+        ARROW_RIGHT, ARROW_UP as PARENT, ARROW_U_UP_LEFT as UNARCHIVE, BROADCAST as LIVE, BUG,
+        CHART_LINE as ACTIVITY, CHAT_CIRCLE as COMMENT, CHECK, CHECK_SQUARE as TASK,
+        CIRCLE_DASHED as LOOSE, CROWN as EPIC, DESKTOP, DOT, FOLDER_OPEN as FOLDER,
+        MAGNIFYING_GLASS as SEARCH, MOON, PLUS, PROHIBIT as BLOCKED, ROCKET as RELEASE,
+        SPARKLE as FEATURE, SQUARES_FOUR as BOARD, STACK as EPICS, SUN, TRASH as DELETE,
+        TRAY as BACKLOG, TREE_STRUCTURE as TREE, WARNING, WRENCH as CHORE, X as CLOSE,
+    };
+}
+
+/// Install the Phosphor icon font once (in addition to egui's defaults). Call
+/// from app startup, not from [`apply`] — fonts only need to be set a single time.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    ctx.set_fonts(fonts);
+}
+
 /// Activate `dark`/light tokens and push the matching egui visuals.
 pub fn apply(ctx: &egui::Context, dark: bool) {
     let p = if dark { Palette::dark() } else { Palette::light() };
@@ -381,6 +408,9 @@ pub fn apply(ctx: &egui::Context, dark: bool) {
     style.visuals = v;
     style.spacing.item_spacing = egui::vec2(SP_SM, SP_XS + 2.0);
     style.spacing.button_padding = egui::vec2(SP_SM, SP_XS);
+    // Uniform control height so buttons, combo boxes and text inputs line up on
+    // the same row. (TextEdit ignores this unless given a matching `min_size`.)
+    style.spacing.interact_size.y = CONTROL_H;
     style.spacing.menu_margin = Margin::same(SP_XS);
     ctx.set_style(style);
 }

@@ -220,6 +220,24 @@ pub fn list_all(workspace: &str) -> Result<Vec<Issue>, String> {
     serde_json::from_slice::<Vec<Issue>>(&bytes).map_err(|e| format!("JSON list inválido: {e}"))
 }
 
+/// Create an epic via `bd q` (quick capture, prints only the new ID) and return
+/// that ID. Optional comma-joinable labels are attached with `-l`. `bd q` has no
+/// description flag, so only the title/type/labels are set here.
+pub fn create_epic(workspace: &str, title: &str, labels: &[String]) -> Result<String, String> {
+    let mut args = vec!["q", title, "--type", "epic"];
+    let joined = labels.join(",");
+    if !joined.is_empty() {
+        args.push("-l");
+        args.push(&joined);
+    }
+    let bytes = run(workspace, &args)?;
+    let id = String::from_utf8_lossy(&bytes).trim().to_string();
+    if id.is_empty() {
+        return Err("bd q no devolvió un ID".to_string());
+    }
+    Ok(id)
+}
+
 /// Full detail for one bead, including comments and dependency objects.
 pub fn show(workspace: &str, id: &str) -> Result<Issue, String> {
     let bytes = run(
