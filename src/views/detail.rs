@@ -225,12 +225,8 @@ impl App {
                 BeadAction::Backlog => self.bd_update(&id, "--priority", "4"),
                 BeadAction::SetRelease(new) => self.set_release(&id, cur_release.clone(), new),
                 BeadAction::ArchiveToggle(now) => {
-                    let op = if now { "remove" } else { "add" };
-                    self.run_cmd(
-                        "bd",
-                        vec!["label".into(), op.into(), id.clone(), "archived".into()],
-                        Some(id.clone()),
-                    );
+                    // Cascade to children when this is an epic; unarchive reverses it.
+                    self.set_archived(&[id.clone()], !now);
                 }
                 BeadAction::Delete => self.confirm_delete = Some(id),
             }

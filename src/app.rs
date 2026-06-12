@@ -177,6 +177,9 @@ impl App {
         self.selected = None;
         self.detail = None;
         self.list_error = None;
+        // A selection is workspace-scoped — never carry it across workspaces.
+        self.select_mode = false;
+        self.selected_ids.clear();
         self.watch_mtime = beads_event_mtime(&path);
         self.reload();
     }
@@ -185,6 +188,8 @@ impl App {
         self.in_workspace = false;
         self.selected = None;
         self.detail = None;
+        self.select_mode = false;
+        self.selected_ids.clear();
     }
 
     pub(crate) fn add_workspace(&mut self, path: String) {
@@ -308,6 +313,53 @@ impl App {
                 detail.status = new_status.to_string();
             }
         }
+    }
+
+    /// Archive (or unarchive) the given beads AND all their descendants, so
+    /// archiving an epic cascades to its children. Optimistic: patches labels
+    /// locally and only reloads on error.
+    pub(crate) fn set_archived(&mut self, roots: &[String], archive: bool) {
+        if roots.is_empty() {
+            return;
+        }
+        // Expand to every descendant via the parent chain (handles sub-epics).
+        let mut targets: std::collections::HashSet<String> = roots.iter().cloned().collect();
+        loop {
+            let before = targets.len();
+            for i in &self.issues {
+                if let Some(par) = &i.parent {
+                    if targets.contains(par) {
+                        targets.insert(i.id.clone());
+                    }
+                }
+            }
+            if targets.len() == before {
+                break;
+            }
+        }
+        let patch = |labels: &mut Vec<String>| {
+            let has = labels.iter().any(|l| l.eq_ignore_ascii_case("archived"));
+            if archive && !has {
+                labels.push("archived".to_string());
+            } else if !archive {
+                labels.retain(|l| !l.eq_ignore_ascii_case("archived"));
+            }
+        };
+        for issue in self.issues.iter_mut().filter(|i| targets.contains(&i.id)) {
+            patch(&mut issue.labels);
+        }
+        if let Some(d) = self.detail.as_mut() {
+            if targets.contains(&d.id) {
+                patch(&mut d.labels);
+            }
+        }
+        let op = if archive { "add" } else { "remove" };
+        let mut ids: Vec<String> = targets.into_iter().collect();
+        ids.sort();
+        let mut args = vec!["label".to_string(), op.to_string()];
+        args.extend(ids);
+        args.push("archived".to_string());
+        self.run_cmd_optimistic("bd", args, None);
     }
 
     /// Roster of selectable agents: initech roles ∪ assignees, sorted.

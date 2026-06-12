@@ -167,7 +167,6 @@ impl App {
         let p = t::pal();
         let selected = self.selected.as_deref() == Some(&i.id);
         let checked = self.selected_ids.contains(&i.id);
-        let mut toggled = false;
         let resp = egui::Frame::none()
             .fill(if checked {
                 p.green_t
@@ -181,10 +180,12 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if self.select_mode {
-                        let mut c = checked;
-                        if ui.checkbox(&mut c, "").changed() {
-                            toggled = true;
-                        }
+                        let (glyph, color) = if checked {
+                            (t::ic::CHECKBOX, p.green)
+                        } else {
+                            (t::ic::UNCHECKED, p.text_sub)
+                        };
+                        ui.label(RichText::new(glyph).color(color));
                     }
                     let (glyph, tc) = t::type_glyph(&i.issue_type);
                     ui.label(RichText::new(glyph).color(tc));
@@ -205,13 +206,12 @@ impl App {
                 });
             })
             .response;
-        if toggled {
-            return Some(RowAction::Toggle);
+        let clicked = resp.interact(egui::Sense::click()).clicked();
+        if self.select_mode {
+            // In select mode the whole row toggles selection (matches the board).
+            return clicked.then_some(RowAction::Toggle);
         }
-        if resp.interact(egui::Sense::click()).clicked() {
-            return Some(RowAction::Open);
-        }
-        None
+        clicked.then_some(RowAction::Open)
     }
 
     pub(crate) fn subtree_has_match(&self, idx: usize, children: &HashMap<String, Vec<usize>>) -> bool {

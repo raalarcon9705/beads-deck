@@ -16,7 +16,16 @@ impl App {
             .frame(egui::Frame::none().fill(p.surface).inner_margin(Margin::symmetric(12.0, 8.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button(format!("{} Back", t::ic::BACK)).on_hover_text(&self.workspace).clicked() {
+                    let back_hint = if self.select_mode {
+                        "Exit Select mode before switching workspace"
+                    } else {
+                        self.workspace.as_str()
+                    };
+                    if ui
+                        .add_enabled(!self.select_mode, egui::Button::new(format!("{} Back", t::ic::BACK)))
+                        .on_hover_text(back_hint)
+                        .clicked()
+                    {
                         self.go_back();
                     }
                     ui.add_space(t::SP_SM);

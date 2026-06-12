@@ -116,8 +116,8 @@ impl App {
             Some(Bulk::Assignee(Some(a))) => self.bulk_update("--assignee", &a),
             Some(Bulk::Assignee(None)) => self.bulk_update("--assignee", ""),
             Some(Bulk::Release(r)) => self.bulk_label("add", &format!("{RELEASE_PREFIX}{r}")),
-            Some(Bulk::Archive) => self.bulk_label("add", "archived"),
-            Some(Bulk::Unarchive) => self.bulk_label("remove", "archived"),
+            Some(Bulk::Archive) => self.bulk_archive(true),
+            Some(Bulk::Unarchive) => self.bulk_archive(false),
             Some(Bulk::Delete) => self.confirm_bulk_delete = true,
             Some(Bulk::Clear) => self.selected_ids.clear(),
             None => {}
@@ -130,30 +130,62 @@ impl App {
         v
     }
 
-    /// `bd update <ids…> <flag> <value>` across the selection, then clear it.
+    /// `bd update <ids…> <flag> <value>` across the selection. Patches local
+    /// state immediately (optimistic) and only reloads on error — same pattern
+    /// as drag-and-drop on the board.
     pub(crate) fn bulk_update(&mut self, flag: &str, value: &str) {
         let ids = self.selected_vec();
         if ids.is_empty() {
             return;
         }
+        let sel: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        for issue in self.issues.iter_mut().filter(|i| sel.contains(i.id.as_str())) {
+            match flag {
+                "--status" => issue.status = value.to_string(),
+                "--priority" => {
+                    issue.priority = value.trim_start_matches('P').parse().unwrap_or(issue.priority)
+                }
+                "--assignee" => {
+                    issue.assignee = (!value.is_empty()).then(|| value.to_string())
+                }
+                _ => {}
+            }
+        }
         let mut args = vec!["update".to_string()];
         args.extend(ids);
         args.push(flag.to_string());
         args.push(value.to_string());
-        self.run_cmd("bd", args, None);
+        self.run_cmd_optimistic("bd", args, None);
         self.selected_ids.clear();
     }
 
-    /// `bd label add|remove <ids…> <label>` across the selection, then clear it.
+    /// Archive/unarchive the selection, cascading to children of any epics.
+    pub(crate) fn bulk_archive(&mut self, archive: bool) {
+        let ids = self.selected_vec();
+        self.set_archived(&ids, archive);
+        self.selected_ids.clear();
+    }
+
+    /// `bd label add|remove <ids…> <label>` across the selection (optimistic).
     pub(crate) fn bulk_label(&mut self, op: &str, label: &str) {
         let ids = self.selected_vec();
         if ids.is_empty() {
             return;
         }
+        let sel: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        for issue in self.issues.iter_mut().filter(|i| sel.contains(i.id.as_str())) {
+            match op {
+                "add" if !issue.labels.iter().any(|l| l == label) => {
+                    issue.labels.push(label.to_string())
+                }
+                "remove" => issue.labels.retain(|l| l != label),
+                _ => {}
+            }
+        }
         let mut args = vec!["label".to_string(), op.to_string()];
         args.extend(ids);
         args.push(label.to_string());
-        self.run_cmd("bd", args, None);
+        self.run_cmd_optimistic("bd", args, None);
         self.selected_ids.clear();
     }
 
@@ -199,10 +231,17 @@ impl App {
         if yes {
             self.confirm_bulk_delete = false;
             if !ids.is_empty() {
+                let sel: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+                // Optimistic: drop the beads from the list (and detail) immediately.
+                self.issues.retain(|i| !sel.contains(i.id.as_str()));
+                if self.selected.as_deref().map(|s| sel.contains(s)).unwrap_or(false) {
+                    self.selected = None;
+                    self.detail = None;
+                }
                 let mut args = vec!["delete".to_string()];
                 args.extend(ids);
                 args.push("--force".to_string());
-                self.run_cmd("bd", args, None);
+                self.run_cmd_optimistic("bd", args, None);
             }
             self.selected_ids.clear();
         }
