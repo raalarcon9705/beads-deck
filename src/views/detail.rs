@@ -41,11 +41,10 @@ impl App {
         let mut action: Option<BeadAction> = None;
 
         // Options (computed before the UI closures borrow nothing of self).
-        let mut status_opts: Vec<String> = STATUS_ORDER.iter().map(|s| s.to_string()).collect();
-        for s in self.statuses_present() {
-            if !status_opts.contains(&s) {
-                status_opts.push(s);
-            }
+        let mut status_opts: Vec<String> = self.selectable_statuses();
+        // Ensure the bead's own status is selectable even if unconfigured.
+        if !status_opts.contains(&i.status) {
+            status_opts.push(i.status.clone());
         }
         let roster = self.agent_roster();
         let releases = self.releases();

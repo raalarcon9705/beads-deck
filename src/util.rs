@@ -44,6 +44,12 @@ pub(crate) fn status_rank(s: &str) -> usize {
 }
 
 /// mtime of the workspace event log — the cheap real-time change signal.
+///
+/// We watch only `interactions.jsonl` on purpose: `bd list` (run on every reload)
+/// rewrites the Dolt store under `…/.dolt/noms/`, so watching those files would
+/// cause an infinite reload loop. The event log is only appended on real status /
+/// assignment activity, so it's a safe signal. (Create/delete and `bd config`
+/// changes land only in the Dolt store and aren't auto-detected — use Reload.)
 pub(crate) fn beads_event_mtime(ws: &str) -> Option<std::time::SystemTime> {
     std::fs::metadata(format!("{ws}/.beads/interactions.jsonl"))
         .and_then(|m| m.modified())

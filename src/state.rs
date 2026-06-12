@@ -1,6 +1,6 @@
 //! UI state enums and the background-thread message type.
 
-use crate::bd::{HistoryEntry, Interaction, Issue};
+use crate::bd::{HistoryEntry, Interaction, Issue, StatusDef};
 
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum Sort {
@@ -29,6 +29,7 @@ pub(crate) enum Msg {
         events: Vec<Interaction>,
         roles: Vec<String>,
         comment_index: std::collections::HashMap<String, String>,
+        statuses: Vec<StatusDef>,
     },
     Detail {
         id: String,

@@ -11,7 +11,7 @@ impl App {
     pub(crate) fn board_view(&mut self, ui: &mut egui::Ui) {
         let mut clicked: Option<String> = None;
         let col_h = ui.available_height();
-        let cols = self.statuses_present();
+        let cols = self.board_columns();
 
         // Check if a drag was just released over a column.
         let drag_released = ui.input(|i| i.pointer.any_released());

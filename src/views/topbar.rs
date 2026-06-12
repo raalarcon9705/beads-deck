@@ -10,7 +10,7 @@ use egui::{Margin, RichText, Rounding};
 impl App {
     pub(crate) fn top_bar(&mut self, ctx: &egui::Context) {
         let p = t::pal();
-        let statuses = self.statuses_present();
+        let statuses = self.selectable_statuses();
         let roster = self.agent_roster();
         egui::TopBottomPanel::top("top")
             .frame(egui::Frame::none().fill(p.surface).inner_margin(Margin::symmetric(12.0, 8.0)))

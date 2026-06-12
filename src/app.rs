@@ -29,6 +29,8 @@ pub(crate) struct App {
     pub(crate) comment_index: std::collections::HashMap<String, String>,
     pub(crate) board_col_rects: std::collections::HashMap<String, egui::Rect>,
     pub(crate) roles: Vec<String>,
+    /// Valid workflow statuses (built-in + custom) from `bd statuses`.
+    pub(crate) workflow_statuses: Vec<crate::bd::StatusDef>,
     pub(crate) action_error: Option<String>,
     pub(crate) confirm_delete: Option<String>,
     pub(crate) confirm_delete_agent: Option<String>,
@@ -108,6 +110,7 @@ impl App {
             comment_index: std::collections::HashMap::new(),
             board_col_rects: std::collections::HashMap::new(),
             roles: Vec::new(),
+            workflow_statuses: Vec::new(),
             action_error: None,
             confirm_delete: None,
             confirm_delete_agent: None,
@@ -228,7 +231,8 @@ impl App {
             let events = bd::read_interactions(&ws);
             let roles = bd::read_roles(&ws);
             let comment_index = bd::comment_index(&ws);
-            let _ = tx.send(Msg::Loaded { issues, events, roles, comment_index });
+            let statuses = bd::workflow_statuses(&ws);
+            let _ = tx.send(Msg::Loaded { issues, events, roles, comment_index, statuses });
             ctx.request_repaint();
         });
     }
@@ -329,11 +333,12 @@ impl App {
     pub(crate) fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Loaded { issues, events, roles, comment_index } => {
+                Msg::Loaded { issues, events, roles, comment_index, statuses } => {
                     self.loading_list = false;
                     self.events = events;
                     self.roles = roles;
                     self.comment_index = comment_index;
+                    self.workflow_statuses = statuses;
                     self.watch_mtime = beads_event_mtime(&self.workspace);
                     match issues {
                         Ok(v) => {

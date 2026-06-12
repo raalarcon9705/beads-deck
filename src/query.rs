@@ -7,6 +7,17 @@ use crate::state::{Msg, Sort};
 use crate::util::*;
 use std::thread;
 
+/// Category sort rank for board columns (pipeline order, left→right).
+fn status_category_rank(cat: &str) -> usize {
+    match cat {
+        "active" => 0,
+        "wip" => 1,
+        "done" => 2,
+        "frozen" => 3,
+        _ => 4,
+    }
+}
+
 impl App {
     pub(crate) fn passes_filter(&self, i: &Issue) -> bool {
         if let Some(s) = &self.filter_status {
@@ -78,6 +89,50 @@ impl App {
                 .then_with(|| a.cmp(b))
         });
         set
+    }
+
+    /// All statuses selectable in dropdowns: the configured workflow statuses
+    /// (built-in + custom from `bd statuses`) plus any status present on issues
+    /// but not configured. Falls back to present statuses if `bd statuses` is
+    /// unavailable.
+    pub(crate) fn selectable_statuses(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.workflow_statuses.iter().map(|s| s.name.clone()).collect();
+        for s in self.statuses_present() {
+            if !v.contains(&s) {
+                v.push(s);
+            }
+        }
+        v
+    }
+
+    /// Statuses to render as board columns: those present on issues plus any
+    /// custom-configured status (so newly-added custom states appear as empty
+    /// columns), ordered as a left→right pipeline by category then config order.
+    pub(crate) fn board_columns(&self) -> Vec<String> {
+        let present = self.statuses_present();
+        let mut cols: Vec<String> = Vec::new();
+        for s in &self.workflow_statuses {
+            let shown = present.iter().any(|p| p == &s.name) || s.custom;
+            if shown && !cols.contains(&s.name) {
+                cols.push(s.name.clone());
+            }
+        }
+        cols.sort_by_key(|name| {
+            self.workflow_statuses
+                .iter()
+                .position(|s| &s.name == name)
+                .map(|i| (status_category_rank(&self.workflow_statuses[i].category), i))
+                .unwrap_or((9, 0))
+        });
+        for s in &present {
+            if !cols.contains(s) {
+                cols.push(s.clone());
+            }
+        }
+        if cols.is_empty() {
+            return present;
+        }
+        cols
     }
 
     /// Distinct release names present across all loaded beads (sorted).

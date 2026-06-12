@@ -238,6 +238,41 @@ pub fn create_epic(workspace: &str, title: &str, labels: &[String]) -> Result<St
     Ok(id)
 }
 
+/// One workflow status as reported by `bd statuses --json`.
+#[derive(Debug, Clone)]
+pub struct StatusDef {
+    pub name: String,
+    pub category: String,
+    pub custom: bool,
+}
+
+/// Valid workflow statuses for the workspace — built-in plus any configured via
+/// `bd config set status.custom …`, in bd's order. Empty on any error so the UI
+/// falls back to the statuses actually present on issues.
+pub fn workflow_statuses(workspace: &str) -> Vec<StatusDef> {
+    let Ok(bytes) = run(workspace, &["statuses", "--json"]) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (key, custom) in [("built_in_statuses", false), ("custom_statuses", true)] {
+        if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
+            for s in arr {
+                if let Some(name) = s.get("name").and_then(|x| x.as_str()) {
+                    out.push(StatusDef {
+                        name: name.to_string(),
+                        category: s.get("category").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                        custom,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Full detail for one bead, including comments and dependency objects.
 pub fn show(workspace: &str, id: &str) -> Result<Issue, String> {
     let bytes = run(
