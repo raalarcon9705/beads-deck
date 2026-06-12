@@ -7,7 +7,7 @@ mod markdown;
 mod theme;
 
 use bd::{HistoryEntry, Interaction, Issue};
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Utc};
 use eframe::egui;
 use egui_commonmark::CommonMarkCache;
 use serde::{Deserialize, Serialize};
@@ -1355,7 +1355,6 @@ impl App {
             ui.set_opacity(opacity);
             t::card_frame(selected).show(ui, |ui| {
                 ui.set_width(t::CARD_W);
-                // Disable text selection inside labels so drag can activate.
                 ui.style_mut().interaction.selectable_labels = false;
                 ui.label(RichText::new(&i.title).size(t::FS_BODY).color(p.text));
                 ui.add_space(t::SP_SM);
@@ -1368,6 +1367,12 @@ impl App {
                             t::avatar(ui, a, 18.0);
                         }
                         t::priority_lozenge(ui, i.priority);
+                        if i.comment_count > 0 {
+                            ui.label(RichText::new(format!("\u{1F4AC}{}", i.comment_count)).size(t::FS_CAPTION).color(p.text_sub));
+                        }
+                        if i.dependency_count > 0 {
+                            ui.label(RichText::new(format!("\u{26D4}{}", i.dependency_count)).size(t::FS_CAPTION).color(p.text_sub));
+                        }
                     });
                 });
             }).response
@@ -1420,36 +1425,6 @@ impl App {
         }
 
         drag_resp.clicked()
-    }
-
-    fn card(&self, ui: &mut egui::Ui, i: &Issue) -> bool {
-        let p = t::pal();
-        let selected = self.selected.as_deref() == Some(&i.id);
-        let resp = t::card_frame(selected)
-            .show(ui, |ui| {
-                ui.set_width(t::CARD_W);
-                ui.label(RichText::new(&i.title).size(t::FS_BODY).color(p.text));
-                ui.add_space(t::SP_SM);
-                ui.horizontal(|ui| {
-                    let (glyph, tc) = t::type_glyph(&i.issue_type);
-                    ui.label(RichText::new(glyph).color(tc));
-                    t::copyable_id(ui, &i.id, t::FS_CAPTION);
-                    t::priority_lozenge(ui, i.priority);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(a) = i.assignee.as_deref().filter(|a| !a.is_empty()) {
-                            t::avatar(ui, a, 22.0);
-                        }
-                        if i.comment_count > 0 {
-                            ui.label(RichText::new(format!("\u{1F4AC}{}", i.comment_count)).size(t::FS_CAPTION).color(p.text_sub));
-                        }
-                        if i.dependency_count > 0 {
-                            ui.label(RichText::new(format!("\u{26D4}{}", i.dependency_count)).size(t::FS_CAPTION).color(p.text_sub));
-                        }
-                    });
-                });
-            })
-            .response;
-        resp.interact(egui::Sense::click()).clicked()
     }
 
     // ---- Activity ----
