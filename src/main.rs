@@ -2270,7 +2270,39 @@ fn load_icon() -> Option<egui::IconData> {
     })
 }
 
+/// GUI apps launched from Finder/Spotlight inherit a minimal PATH that omits
+/// Homebrew and friends, so `bd`/`initech`/`dolt`/`mmdc` aren't found. Prepend
+/// the usual CLI locations so child processes resolve them.
+fn ensure_cli_path() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+        format!("{home}/.cargo/bin"),
+        format!("{home}/.local/bin"),
+    ];
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = Vec::new();
+    for c in candidates {
+        if std::path::Path::new(&c).is_dir()
+            && !current.split(':').any(|p| p == c)
+            && !parts.contains(&c)
+        {
+            parts.push(c);
+        }
+    }
+    if !parts.is_empty() {
+        let new = if current.is_empty() {
+            parts.join(":")
+        } else {
+            format!("{}:{current}", parts.join(":"))
+        };
+        std::env::set_var("PATH", new);
+    }
+}
+
 fn main() -> eframe::Result {
+    ensure_cli_path();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1320.0, 860.0])
         .with_min_inner_size([900.0, 600.0])
