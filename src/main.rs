@@ -4,6 +4,7 @@
 
 mod app;
 mod bd;
+mod lru;
 mod markdown;
 mod query;
 mod registry;

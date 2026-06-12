@@ -13,6 +13,16 @@ use egui_commonmark::CommonMarkCache;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
+/// A previously-fetched bead detail, kept so reopening it is instant while a
+/// fresh `bd show` runs in the background (stale-while-revalidate). Stores the
+/// preprocessed markdown too, so we don't re-run mermaid/mmdc on cache hits.
+#[derive(Clone)]
+pub(crate) struct CachedDetail {
+    pub(crate) issue: Issue,
+    pub(crate) md: String,
+    pub(crate) comments_md: Vec<String>,
+}
+
 pub(crate) struct App {
     pub(crate) ctx: egui::Context,
     pub(crate) tx: Sender<Msg>,
@@ -81,7 +91,18 @@ pub(crate) struct App {
     pub(crate) detail_error: Option<String>,
     pub(crate) history: Result<Vec<HistoryEntry>, String>,
     pub(crate) loading_detail: bool,
+    /// Per-workspace LRU cache of fetched bead details (stale-while-revalidate).
+    pub(crate) detail_cache: crate::lru::Lru<String, CachedDetail>,
+    /// `bd history` is fetched lazily when the History tab is first opened.
+    pub(crate) loading_history: bool,
+    pub(crate) history_loaded: bool,
     pub(crate) detail_tab: DetailTab,
+    /// The comment-search index (`bd export`) is built lazily on first search.
+    pub(crate) comment_index_loaded: bool,
+    pub(crate) loading_comment_index: bool,
+    /// Background mutations in flight; while > 0 the live watcher skips reloads
+    /// so an optimistic change isn't clobbered mid-write.
+    pub(crate) pending_mutations: usize,
 }
 
 impl App {
@@ -158,7 +179,13 @@ impl App {
             detail_error: None,
             history: Ok(Vec::new()),
             loading_detail: false,
+            detail_cache: crate::lru::Lru::new(64),
+            loading_history: false,
+            history_loaded: false,
             detail_tab: DetailTab::Comments,
+            comment_index_loaded: false,
+            loading_comment_index: false,
+            pending_mutations: 0,
         };
         if app.in_workspace {
             app.reload();
@@ -176,6 +203,7 @@ impl App {
         self.events.clear();
         self.selected = None;
         self.detail = None;
+        self.detail_cache.clear();
         self.list_error = None;
         // A selection is workspace-scoped — never carry it across workspaces.
         self.select_mode = false;
@@ -188,6 +216,7 @@ impl App {
         self.in_workspace = false;
         self.selected = None;
         self.detail = None;
+        self.detail_cache.clear();
         self.select_mode = false;
         self.selected_ids.clear();
     }
@@ -241,18 +270,33 @@ impl App {
         self.list_error = None;
         let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
         thread::spawn(move || {
-            let issues = bd::list_all(&ws);
+            // Run the independent `bd` subprocesses concurrently so wall time is
+            // the slowest single call, not their sum. (`bd export` for comment
+            // search is no longer here — it's built lazily on first search.)
+            let h_issues = {
+                let ws = ws.clone();
+                thread::spawn(move || bd::list_all(&ws))
+            };
+            let h_roles = {
+                let ws = ws.clone();
+                thread::spawn(move || bd::read_roles(&ws))
+            };
+            let h_statuses = {
+                let ws = ws.clone();
+                thread::spawn(move || bd::workflow_statuses(&ws))
+            };
             let events = bd::read_interactions(&ws);
-            let roles = bd::read_roles(&ws);
-            let comment_index = bd::comment_index(&ws);
-            let statuses = bd::workflow_statuses(&ws);
-            let _ = tx.send(Msg::Loaded { issues, events, roles, comment_index, statuses });
+            let issues = h_issues.join().unwrap_or_else(|_| Ok(Vec::new()));
+            let roles = h_roles.join().unwrap_or_default();
+            let statuses = h_statuses.join().unwrap_or_default();
+            let _ = tx.send(Msg::Loaded { issues, events, roles, statuses });
             ctx.request_repaint();
         });
     }
 
     /// Run a mutation (bd/initech) in a background thread, then refresh.
-    pub(crate) fn run_cmd(&self, program: &str, args: Vec<String>, reselect: Option<String>) {
+    pub(crate) fn run_cmd(&mut self, program: &str, args: Vec<String>, reselect: Option<String>) {
+        self.pending_mutations += 1;
         let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
         let program = program.to_string();
         thread::spawn(move || {
@@ -264,7 +308,8 @@ impl App {
 
     /// Reassign a bead's release label: drop the old `release:` label (if any)
     /// then add the new one. Both run in one background thread, then refresh.
-    pub(crate) fn set_release(&self, id: &str, current: Option<String>, new: Option<String>) {
+    pub(crate) fn set_release(&mut self, id: &str, current: Option<String>, new: Option<String>) {
+        self.pending_mutations += 1;
         let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
         let id = id.to_string();
         thread::spawn(move || {
@@ -283,7 +328,7 @@ impl App {
         });
     }
 
-    pub(crate) fn bd_update(&self, id: &str, flag: &str, value: &str) {
+    pub(crate) fn bd_update(&mut self, id: &str, flag: &str, value: &str) {
         self.run_cmd(
             "bd",
             vec!["update".into(), id.into(), flag.into(), value.into()],
@@ -292,7 +337,8 @@ impl App {
     }
 
     /// Fire a mutation without reloading on success — caller already patched local state.
-    pub(crate) fn run_cmd_optimistic(&self, program: &str, args: Vec<String>, reselect: Option<String>) {
+    pub(crate) fn run_cmd_optimistic(&mut self, program: &str, args: Vec<String>, reselect: Option<String>) {
+        self.pending_mutations += 1;
         let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
         let program = program.to_string();
         thread::spawn(move || {
@@ -376,17 +422,58 @@ impl App {
 
     pub(crate) fn select(&mut self, id: String) {
         self.selected = Some(id.clone());
-        self.detail = None;
-        self.detail_md = String::new();
-        self.comments_md = Vec::new();
         self.detail_error = None;
         self.history = Ok(Vec::new());
-        self.loading_detail = true;
+        self.history_loaded = false;
+        self.loading_history = false;
+        // Show the cached detail instantly (if any); always refresh in background.
+        if let Some(c) = self.detail_cache.get(&id).cloned() {
+            self.detail = Some(c.issue);
+            self.detail_md = c.md;
+            self.comments_md = c.comments_md;
+            self.loading_detail = false;
+        } else {
+            self.detail = None;
+            self.detail_md = String::new();
+            self.comments_md = Vec::new();
+            self.loading_detail = true;
+        }
         let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
         thread::spawn(move || {
             let issue = bd::show(&ws, &id);
+            let _ = tx.send(Msg::Detail { id, issue });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Fetch `bd history` for the selected bead — called lazily the first time
+    /// the History tab is shown (it's the slowest detail call, ~2s).
+    pub(crate) fn ensure_history(&mut self) {
+        if self.history_loaded || self.loading_history {
+            return;
+        }
+        let Some(id) = self.selected.clone() else { return };
+        self.loading_history = true;
+        let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
+        thread::spawn(move || {
             let history = bd::history(&ws, &id);
-            let _ = tx.send(Msg::Detail { id, issue, history });
+            let _ = tx.send(Msg::History { id, history });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Build the comment-body search index (`bd export`) in the background, only
+    /// when a search is active and it isn't already loaded — keeps it off the
+    /// hot reload path.
+    pub(crate) fn ensure_comment_index(&mut self) {
+        if self.search.is_empty() || self.comment_index_loaded || self.loading_comment_index {
+            return;
+        }
+        self.loading_comment_index = true;
+        let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
+        thread::spawn(move || {
+            let map = bd::comment_index(&ws);
+            let _ = tx.send(Msg::CommentIndex { map });
             ctx.request_repaint();
         });
     }
@@ -401,12 +488,14 @@ impl App {
     pub(crate) fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Loaded { issues, events, roles, comment_index, statuses } => {
+                Msg::Loaded { issues, events, roles, statuses } => {
                     self.loading_list = false;
                     self.events = events;
                     self.roles = roles;
-                    self.comment_index = comment_index;
                     self.workflow_statuses = statuses;
+                    // Comment index is now stale relative to the new data; it is
+                    // rebuilt lazily the next time a search is active.
+                    self.comment_index_loaded = false;
                     self.watch_mtime = beads_event_mtime(&self.workspace);
                     match issues {
                         Ok(v) => {
@@ -423,27 +512,48 @@ impl App {
                         }
                     }
                 }
-                Msg::Detail { id, issue, history } => {
-                    if self.selected.as_deref() == Some(&id) {
-                        self.loading_detail = false;
-                        match issue {
-                            Ok(i) => {
-                                // Preprocess mermaid ONCE here (may spawn mmdc),
-                                // not every frame in the renderer.
-                                self.detail_md = markdown::preprocess(&i.description);
-                                self.comments_md = i
-                                    .comments
-                                    .iter()
-                                    .map(|c| markdown::preprocess(&c.text))
-                                    .collect();
+                Msg::Detail { id, issue } => {
+                    let is_current = self.selected.as_deref() == Some(&id);
+                    match issue {
+                        Ok(i) => {
+                            // Preprocess mermaid ONCE here (may spawn mmdc), not
+                            // every frame — and cache it for instant reopen.
+                            let md = markdown::preprocess(&i.description);
+                            let comments_md: Vec<String> =
+                                i.comments.iter().map(|c| markdown::preprocess(&c.text)).collect();
+                            self.detail_cache.insert(
+                                id.clone(),
+                                CachedDetail { issue: i.clone(), md: md.clone(), comments_md: comments_md.clone() },
+                            );
+                            if is_current {
+                                self.loading_detail = false;
+                                self.detail_md = md;
+                                self.comments_md = comments_md;
                                 self.detail = Some(i);
                             }
-                            Err(e) => self.detail_error = Some(e),
                         }
-                        self.history = history;
+                        Err(e) => {
+                            if is_current {
+                                self.loading_detail = false;
+                                self.detail_error = Some(e);
+                            }
+                        }
                     }
                 }
+                Msg::History { id, history } => {
+                    if self.selected.as_deref() == Some(&id) {
+                        self.history = history;
+                        self.loading_history = false;
+                        self.history_loaded = true;
+                    }
+                }
+                Msg::CommentIndex { map } => {
+                    self.comment_index = map;
+                    self.comment_index_loaded = true;
+                    self.loading_comment_index = false;
+                }
                 Msg::Mutated { reselect, error, optimistic } => {
+                    self.pending_mutations = self.pending_mutations.saturating_sub(1);
                     self.action_error = error.clone();
                     if !optimistic || error.is_some() {
                         // Full reload: either non-optimistic mutation, or need to revert.
@@ -463,6 +573,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.reconcile_theme(ctx);
         self.drain();
+        self.ensure_comment_index();
 
         // No active workspace → show the selector screen.
         if !self.in_workspace {
@@ -473,10 +584,12 @@ impl eframe::App for App {
             return;
         }
 
-        // Real-time: poll the event log mtime; auto-reload on change.
+        // Real-time: poll the event log mtime; auto-reload on change. Skip while a
+        // mutation is in flight so its (slow) background write doesn't trigger a
+        // reload that clobbers the optimistic UI mid-operation.
         if self.live {
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
-            if !self.loading_list {
+            if !self.loading_list && self.pending_mutations == 0 {
                 let m = beads_event_mtime(&self.workspace);
                 if m.is_some() && m != self.watch_mtime {
                     self.reload();

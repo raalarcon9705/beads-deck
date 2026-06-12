@@ -36,13 +36,20 @@ pub(crate) enum Msg {
         issues: Result<Vec<Issue>, String>,
         events: Vec<Interaction>,
         roles: Vec<String>,
-        comment_index: std::collections::HashMap<String, String>,
         statuses: Vec<StatusDef>,
     },
     Detail {
         id: String,
         issue: Result<Issue, String>,
+    },
+    /// Lazy `bd history`, fetched only when the History tab is opened.
+    History {
+        id: String,
         history: Result<Vec<HistoryEntry>, String>,
+    },
+    /// Lazy comment-body search index (`bd export`), built only when searching.
+    CommentIndex {
+        map: std::collections::HashMap<String, String>,
     },
     Mutated {
         reselect: Option<String>,

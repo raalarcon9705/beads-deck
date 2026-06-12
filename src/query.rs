@@ -149,13 +149,14 @@ impl App {
     /// Convert a release into an epic: create the epic, then reparent every bead
     /// carrying `release:<name>` under it. The release label is kept, so the
     /// release grouping and the epic coexist. Runs in a background thread.
-    pub(crate) fn convert_release(&self, release: String) {
+    pub(crate) fn convert_release(&mut self, release: String) {
         let ids: Vec<String> = self
             .issues
             .iter()
             .filter(|i| release_of(i) == Some(release.as_str()))
             .map(|i| i.id.clone())
             .collect();
+        self.pending_mutations += 1;
         let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
         thread::spawn(move || {
             let error = (|| {

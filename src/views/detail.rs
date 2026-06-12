@@ -37,6 +37,10 @@ impl App {
             return;
         }
         let Some(i) = self.detail.clone() else { return };
+        // Fetch history lazily — only once the (slow) History tab is open.
+        if self.detail_tab == DetailTab::History {
+            self.ensure_history();
+        }
         let mut nav: Option<String> = None;
         let mut action: Option<BeadAction> = None;
 
@@ -194,6 +198,7 @@ impl App {
         let md = self.detail_md.clone();
         let comments_md = self.comments_md.clone();
         let history = self.history.clone();
+        let loading_history = self.loading_history;
         let cache = &mut self.md_cache;
         let inner = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -204,7 +209,14 @@ impl App {
                     None
                 }
                 DetailTab::History => {
-                    history_tab(ui, &history);
+                    if loading_history {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new("Loading history…").color(t::pal().text_sub));
+                        });
+                    } else {
+                        history_tab(ui, &history);
+                    }
                     None
                 }
             })
