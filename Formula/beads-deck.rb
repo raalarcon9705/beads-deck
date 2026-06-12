@@ -1,8 +1,8 @@
 class BeadsDeck < Formula
   desc "Lightweight native dashboard for the beads (bd) issue tracker"
   homepage "https://github.com/raalarcon9705/beads-deck"
-  url "https://github.com/raalarcon9705/beads-deck/archive/refs/tags/v0.2.2.tar.gz"
-  sha256 "0e9a28a71b62d76c502bdc979a5b06ee10c918d1579cbbf036854cb3d6ec822d"
+  url "https://github.com/raalarcon9705/beads-deck/archive/refs/tags/v0.2.3.tar.gz"
+  sha256 "REPLACE_WITH_TARBALL_SHA256"
   license "MIT"
   head "https://github.com/raalarcon9705/beads-deck.git", branch: "main"
 
