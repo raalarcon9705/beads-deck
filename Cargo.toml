@@ -1,6 +1,6 @@
 [package]
 name = "beads-deck"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Lightweight native dashboard for the beads (bd) issue tracker — full custom-state, type, comment, dependency and history support."
 license = "MIT"
