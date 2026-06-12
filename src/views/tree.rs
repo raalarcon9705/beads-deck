@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::bd::Issue;
+use crate::state::RowAction;
 use crate::theme as t;
 use crate::util::*;
 use eframe::egui;
@@ -52,6 +53,7 @@ impl App {
         let archived_n = archived.iter().filter(|&&i| self.passes_filter(&self.issues[i])).count();
 
         let mut clicked: Option<String> = None;
+        let mut toggled: Option<String> = None;
         egui::Frame::none()
             .fill(p.surface)
             .rounding(Rounding::same(t::R_LG))
@@ -65,30 +67,41 @@ impl App {
 
                         tree_group(ui, t::ic::EPICS, "Epics", epics_n, true, |ui| {
                             for &r in &epic_roots {
-                                self.tree_node(ui, r, &children, &mut clicked);
+                                self.tree_node(ui, r, &children, &mut clicked, &mut toggled);
                             }
                         });
                         tree_group(ui, t::ic::LOOSE, "Loose Beads", loose_n, false, |ui| {
                             for &r in &loose_roots {
-                                self.tree_node(ui, r, &children, &mut clicked);
+                                self.tree_node(ui, r, &children, &mut clicked, &mut toggled);
                             }
                         });
                         tree_group(ui, t::ic::BACKLOG, "Backlog", backlog_n, false, |ui| {
                             for &i in &backlog {
-                                if self.passes_filter(&self.issues[i]) && self.tree_row(ui, &self.issues[i]) {
-                                    clicked = Some(self.issues[i].id.clone());
+                                if self.passes_filter(&self.issues[i]) {
+                                    match self.tree_row(ui, &self.issues[i]) {
+                                        Some(RowAction::Open) => clicked = Some(self.issues[i].id.clone()),
+                                        Some(RowAction::Toggle) => toggled = Some(self.issues[i].id.clone()),
+                                        None => {}
+                                    }
                                 }
                             }
                         });
                         tree_group(ui, t::ic::ARCHIVE, "Archived", archived_n, false, |ui| {
                             for &i in &archived {
-                                if self.passes_filter(&self.issues[i]) && self.tree_row(ui, &self.issues[i]) {
-                                    clicked = Some(self.issues[i].id.clone());
+                                if self.passes_filter(&self.issues[i]) {
+                                    match self.tree_row(ui, &self.issues[i]) {
+                                        Some(RowAction::Open) => clicked = Some(self.issues[i].id.clone()),
+                                        Some(RowAction::Toggle) => toggled = Some(self.issues[i].id.clone()),
+                                        None => {}
+                                    }
                                 }
                             }
                         });
                     });
             });
+        if let Some(id) = toggled {
+            self.toggle_select(id);
+        }
         if let Some(id) = clicked {
             self.select(id);
         }
@@ -111,6 +124,7 @@ impl App {
         idx: usize,
         children: &HashMap<String, Vec<usize>>,
         clicked: &mut Option<String>,
+        toggled: &mut Option<String>,
     ) {
         let i = &self.issues[idx];
         let kids = children.get(&i.id);
@@ -129,27 +143,49 @@ impl App {
             .id_salt(&i.id)
             .default_open(true)
             .show(ui, |ui| {
-                if self.passes_filter(i) && self.tree_row(ui, i) {
-                    *clicked = Some(i.id.clone());
+                if self.passes_filter(i) {
+                    match self.tree_row(ui, i) {
+                        Some(RowAction::Open) => *clicked = Some(i.id.clone()),
+                        Some(RowAction::Toggle) => *toggled = Some(i.id.clone()),
+                        None => {}
+                    }
                 }
                 for &c in kids {
-                    self.tree_node(ui, c, children, clicked);
+                    self.tree_node(ui, c, children, clicked, toggled);
                 }
             });
-        } else if self.passes_filter(i) && self.tree_row(ui, i) {
-            *clicked = Some(i.id.clone());
+        } else if self.passes_filter(i) {
+            match self.tree_row(ui, i) {
+                Some(RowAction::Open) => *clicked = Some(i.id.clone()),
+                Some(RowAction::Toggle) => *toggled = Some(i.id.clone()),
+                None => {}
+            }
         }
     }
 
-    pub(crate) fn tree_row(&self, ui: &mut egui::Ui, i: &Issue) -> bool {
+    pub(crate) fn tree_row(&self, ui: &mut egui::Ui, i: &Issue) -> Option<RowAction> {
         let p = t::pal();
         let selected = self.selected.as_deref() == Some(&i.id);
+        let checked = self.selected_ids.contains(&i.id);
+        let mut toggled = false;
         let resp = egui::Frame::none()
-            .fill(if selected { p.blue_t } else { egui::Color32::TRANSPARENT })
+            .fill(if checked {
+                p.green_t
+            } else if selected {
+                p.blue_t
+            } else {
+                egui::Color32::TRANSPARENT
+            })
             .rounding(Rounding::same(t::R_SM))
             .inner_margin(Margin::symmetric(6.0, 3.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if self.select_mode {
+                        let mut c = checked;
+                        if ui.checkbox(&mut c, "").changed() {
+                            toggled = true;
+                        }
+                    }
                     let (glyph, tc) = t::type_glyph(&i.issue_type);
                     ui.label(RichText::new(glyph).color(tc));
                     t::priority_lozenge(ui, i.priority);
@@ -169,7 +205,13 @@ impl App {
                 });
             })
             .response;
-        resp.interact(egui::Sense::click()).clicked()
+        if toggled {
+            return Some(RowAction::Toggle);
+        }
+        if resp.interact(egui::Sense::click()).clicked() {
+            return Some(RowAction::Open);
+        }
+        None
     }
 
     pub(crate) fn subtree_has_match(&self, idx: usize, children: &HashMap<String, Vec<usize>>) -> bool {

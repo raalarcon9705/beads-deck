@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::bd::Issue;
+use crate::state::RowAction;
 use crate::theme as t;
 use crate::util::*;
 use eframe::egui;
@@ -10,6 +11,7 @@ use egui::{Margin, RichText, Rounding};
 impl App {
     pub(crate) fn board_view(&mut self, ui: &mut egui::Ui) {
         let mut clicked: Option<String> = None;
+        let mut toggled: Option<String> = None;
         let col_h = ui.available_height();
         let cols = self.board_columns();
 
@@ -82,8 +84,10 @@ impl App {
                                 .show(ui, |ui| {
                                     ui.set_width(t::COL_W - 4.0);
                                     for i in &items {
-                                        if self.draggable_card(ui, i) {
-                                            clicked = Some(i.id.clone());
+                                        match self.draggable_card(ui, i) {
+                                            Some(RowAction::Open) => clicked = Some(i.id.clone()),
+                                            Some(RowAction::Toggle) => toggled = Some(i.id.clone()),
+                                            None => {}
                                         }
                                         ui.add_space(t::SP_SM);
                                     }
@@ -118,14 +122,18 @@ impl App {
             }
         }
 
+        if let Some(id) = toggled {
+            self.toggle_select(id);
+        }
         if let Some(id) = clicked {
             self.select(id);
         }
     }
 
-    pub(crate) fn draggable_card(&self, ui: &mut egui::Ui, i: &Issue) -> bool {
+    pub(crate) fn draggable_card(&self, ui: &mut egui::Ui, i: &Issue) -> Option<RowAction> {
         let p = t::pal();
         let selected = self.selected.as_deref() == Some(&i.id);
+        let checked = self.selected_ids.contains(&i.id);
         let is_being_dragged = egui::DragAndDrop::payload::<String>(ui.ctx())
             .map(|pay| *pay == i.id).unwrap_or(false);
 
@@ -133,10 +141,22 @@ impl App {
         let opacity = if is_being_dragged { 0.35 } else { 1.0 };
         let card_resp = ui.add_enabled_ui(true, |ui| {
             ui.set_opacity(opacity);
-            t::card_frame(selected).show(ui, |ui| {
+            t::card_frame(selected || checked).show(ui, |ui| {
                 ui.set_width(t::CARD_W);
                 ui.style_mut().interaction.selectable_labels = false;
-                ui.label(RichText::new(&i.title).size(t::FS_BODY).color(p.text));
+                if self.select_mode {
+                    let (glyph, color) = if checked {
+                        (t::ic::CHECKBOX, p.green)
+                    } else {
+                        (t::ic::UNCHECKED, p.text_sub)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(glyph).color(color));
+                        ui.add(egui::Label::new(RichText::new(&i.title).size(t::FS_BODY).color(p.text)).truncate());
+                    });
+                } else {
+                    ui.label(RichText::new(&i.title).size(t::FS_BODY).color(p.text));
+                }
                 ui.add_space(t::SP_SM);
                 ui.horizontal(|ui| {
                     let (glyph, tc) = t::type_glyph(&i.issue_type);
@@ -157,6 +177,17 @@ impl App {
                 });
             }).response
         }).inner;
+
+        // In select mode the card is a selection target, not draggable: a click
+        // anywhere on it toggles membership in the bulk selection.
+        if self.select_mode {
+            let resp = ui.interact(
+                card_resp.rect,
+                egui::Id::new(("card_sel", &i.id)),
+                egui::Sense::click(),
+            );
+            return resp.clicked().then_some(RowAction::Toggle);
+        }
 
         // Overlay the full card rect with a drag+click sense so it wins over
         // child label events — this is the standard egui D&D pattern.
@@ -204,7 +235,7 @@ impl App {
             }
         }
 
-        drag_resp.clicked()
+        drag_resp.clicked().then_some(RowAction::Open)
     }
 
     // ---- Activity ----

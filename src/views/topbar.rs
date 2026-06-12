@@ -41,6 +41,17 @@ impl App {
                     {
                         self.live = !self.live;
                     }
+                    let sel_color = if self.select_mode { p.green } else { p.text_sub };
+                    if ui
+                        .selectable_label(self.select_mode, RichText::new(format!("{} Select", t::ic::CHECKBOX)).color(sel_color))
+                        .on_hover_text("Multi-select beads for bulk actions")
+                        .clicked()
+                    {
+                        self.select_mode = !self.select_mode;
+                        if !self.select_mode {
+                            self.selected_ids.clear();
+                        }
+                    }
                     if self.loading_list {
                         ui.spinner();
                     }

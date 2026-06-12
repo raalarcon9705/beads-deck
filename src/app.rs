@@ -31,6 +31,12 @@ pub(crate) struct App {
     pub(crate) roles: Vec<String>,
     /// Valid workflow statuses (built-in + custom) from `bd statuses`.
     pub(crate) workflow_statuses: Vec<crate::bd::StatusDef>,
+    /// Bulk-selection mode: cards/rows show checkboxes and a floating action bar.
+    pub(crate) select_mode: bool,
+    /// Beads currently selected for a bulk action.
+    pub(crate) selected_ids: std::collections::HashSet<String>,
+    /// Pending confirmation for a bulk delete.
+    pub(crate) confirm_bulk_delete: bool,
     pub(crate) action_error: Option<String>,
     pub(crate) confirm_delete: Option<String>,
     pub(crate) confirm_delete_agent: Option<String>,
@@ -111,6 +117,9 @@ impl App {
             board_col_rects: std::collections::HashMap::new(),
             roles: Vec::new(),
             workflow_statuses: Vec::new(),
+            select_mode: false,
+            selected_ids: std::collections::HashSet::new(),
+            confirm_bulk_delete: false,
             action_error: None,
             confirm_delete: None,
             confirm_delete_agent: None,
@@ -330,6 +339,13 @@ impl App {
         });
     }
 
+    /// Add/remove a bead from the bulk selection.
+    pub(crate) fn toggle_select(&mut self, id: String) {
+        if !self.selected_ids.remove(&id) {
+            self.selected_ids.insert(id);
+        }
+    }
+
     pub(crate) fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -443,8 +459,10 @@ impl eframe::App for App {
                 View::Activity => self.activity_view(ui),
             });
 
+        self.bulk_action_bar(ctx);
         self.confirm_delete_modal(ctx);
         self.confirm_convert_modal(ctx);
+        self.confirm_bulk_delete_modal(ctx);
         self.confirm_delete_agent_modal(ctx);
         if self.show_add_agent {
             self.add_agent_modal(ctx);

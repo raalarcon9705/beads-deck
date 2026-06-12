@@ -2,6 +2,7 @@
 
 pub(crate) mod activity;
 pub(crate) mod board;
+pub(crate) mod bulk;
 pub(crate) mod detail;
 pub(crate) mod modals;
 pub(crate) mod releases;

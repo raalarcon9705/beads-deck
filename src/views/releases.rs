@@ -1,6 +1,7 @@
 //! Releases view: beads grouped by `release:` label, with conversion to epic.
 
 use crate::app::App;
+use crate::state::RowAction;
 use crate::theme as t;
 use crate::util::*;
 use eframe::egui;
@@ -25,6 +26,7 @@ impl App {
         }
 
         let mut clicked: Option<String> = None;
+        let mut toggled: Option<String> = None;
         let mut convert: Option<String> = None;
         egui::Frame::none()
             .fill(p.surface)
@@ -86,8 +88,10 @@ impl App {
                                     ui.add_space(t::SP_XS);
                                 }
                                 for &i in &visible {
-                                    if self.tree_row(ui, &self.issues[i]) {
-                                        clicked = Some(self.issues[i].id.clone());
+                                    match self.tree_row(ui, &self.issues[i]) {
+                                        Some(RowAction::Open) => clicked = Some(self.issues[i].id.clone()),
+                                        Some(RowAction::Toggle) => toggled = Some(self.issues[i].id.clone()),
+                                        None => {}
                                     }
                                 }
                             });
@@ -95,6 +99,9 @@ impl App {
                     });
             });
 
+        if let Some(id) = toggled {
+            self.toggle_select(id);
+        }
         if let Some(id) = clicked {
             self.select(id);
         }

@@ -2,6 +2,14 @@
 
 use crate::bd::{HistoryEntry, Interaction, Issue, StatusDef};
 
+/// What a clickable card/row did this frame.
+pub(crate) enum RowAction {
+    /// Open the bead in the detail panel.
+    Open,
+    /// Toggle the bead's membership in the bulk selection.
+    Toggle,
+}
+
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) enum Sort {
     Priority,
