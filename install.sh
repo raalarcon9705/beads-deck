@@ -147,6 +147,8 @@ PLIST
   codesign --force --deep --sign - "$dest/$APP_NAME.app" >/dev/null 2>&1 || true
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "$dest/$APP_NAME.app" >/dev/null 2>&1 || true
+  # Feed Spotlight's metadata index so it's searchable via Cmd+Space immediately.
+  mdimport "$dest/$APP_NAME.app" >/dev/null 2>&1 || true
   rm -rf "$work"
   info "Installed app bundle → $dest/$APP_NAME.app (Spotlight: 'Beads Deck')"
 }
