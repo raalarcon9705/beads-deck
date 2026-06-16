@@ -35,11 +35,23 @@ impl App {
                 return false;
             }
         }
+        if let Some(r) = &self.filter_release {
+            if release_of(i) != Some(r.as_str()) {
+                return false;
+            }
+        }
+        if let Some(want) = self.filter_jira {
+            let has = i.external_ref.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+            if has != want {
+                return false;
+            }
+        }
         if !self.search.is_empty() {
             let q = self.search.to_lowercase();
             let in_meta = i.id.to_lowercase().contains(&q)
                 || i.title.to_lowercase().contains(&q)
-                || i.description.to_lowercase().contains(&q);
+                || i.description.to_lowercase().contains(&q)
+                || i.external_ref.as_deref().map(|r| r.to_lowercase().contains(&q)).unwrap_or(false);
             let in_comments = self
                 .comment_index
                 .get(&i.id)
@@ -117,12 +129,21 @@ impl App {
                 cols.push(s.name.clone());
             }
         }
+        let schema = crate::schema::wf();
         cols.sort_by_key(|name| {
-            self.workflow_statuses
-                .iter()
-                .position(|s| &s.name == name)
-                .map(|i| (status_category_rank(&self.workflow_statuses[i].category), i))
-                .unwrap_or((9, 0))
+            // Side states (blocked/deferred/…) always sort after the pipeline.
+            let side = schema.is_side(name);
+            let ord = if !schema.is_empty() {
+                schema.order(name)
+            } else {
+                // No schema: fall back to bd category order, then config index.
+                self.workflow_statuses
+                    .iter()
+                    .position(|s| &s.name == name)
+                    .map(|i| status_category_rank(&self.workflow_statuses[i].category) * 1000 + i)
+                    .unwrap_or(9999)
+            };
+            (side, ord, name.clone())
         });
         for s in &present {
             if !cols.contains(s) {

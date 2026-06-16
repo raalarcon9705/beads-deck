@@ -58,6 +58,10 @@ impl App {
         let mut adding_release = self.adding_release;
         let focus_new_release = std::mem::take(&mut self.focus_release);
         let mut request_focus_next = false;
+        let mut jira_buf = std::mem::take(&mut self.jira_buf);
+        let mut editing_jira = self.editing_jira;
+        let focus_jira = std::mem::take(&mut self.focus_jira);
+        let mut request_focus_jira = false;
         let archived_now = is_archived(&i);
         let backlog_now = is_backlog(&i);
 
@@ -65,6 +69,13 @@ impl App {
             let (glyph, tc) = t::type_glyph(&i.issue_type);
             ui.label(RichText::new(glyph).size(t::FS_H1).color(tc));
             t::copyable_id(ui, &i.id, t::FS_BODY);
+            if let Some(key) = external_key(&i) {
+                ui.label(
+                    RichText::new(format!("{} {key}", crate::schema::wf().ref_label()))
+                        .size(t::FS_SMALL)
+                        .color(p.primary),
+                );
+            }
             if let Some(par) = &i.parent {
                 ui.label(RichText::new(t::ic::PARENT).size(t::FS_SMALL).color(p.text_sub));
                 if t::bead_link(ui, par) {
@@ -94,10 +105,17 @@ impl App {
         // Interactive status / priority / assignee.
         ui.horizontal_wrapped(|ui| {
             let cur = t::status_style(&i.status);
+            let schema = crate::schema::wf();
             egui::ComboBox::from_id_salt("d_status")
                 .selected_text(RichText::new(cur.label).color(cur.fg).strong())
                 .show_ui(ui, |ui| {
                     for s in &status_opts {
+                        // Only offer legal transitions (current state always shown).
+                        // With no transitions configured, can_transition is always
+                        // true → unrestricted, so unknown workflows aren't blocked.
+                        if s != &i.status && !schema.can_transition(&i.status, s) {
+                            continue;
+                        }
                         if ui.selectable_label(s == &i.status, t::status_style(s).label).clicked()
                             && s != &i.status
                         {
@@ -105,6 +123,15 @@ impl App {
                         }
                     }
                 });
+            // Role that owns the current state (from the schema), if any.
+            if let Some(owner) = schema.owner(&i.status) {
+                ui.label(
+                    RichText::new(format!("{} {owner}", t::ic::AGENT))
+                        .size(t::FS_SMALL)
+                        .color(p.text_sub),
+                )
+                .on_hover_text("Role that owns this state");
+            }
             egui::ComboBox::from_id_salt("d_prio")
                 .selected_text(format!("P{}", i.priority))
                 .show_ui(ui, |ui| {
@@ -181,6 +208,56 @@ impl App {
         self.release_buf = release_buf;
         self.adding_release = adding_release;
         self.focus_release = request_focus_next;
+
+        // External-tracker key (Jira) — view / link / edit / clear, inline.
+        let ref_label = crate::schema::wf().ref_label().to_string();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} {ref_label}:", t::ic::PARENT)).size(t::FS_SMALL).color(p.text_sub));
+            if editing_jira {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut jira_buf)
+                        .hint_text(format!("{ref_label} key…"))
+                        .desired_width(180.0)
+                        .min_size(egui::vec2(0.0, t::CONTROL_H))
+                        .vertical_align(egui::Align::Center),
+                );
+                if focus_jira {
+                    resp.request_focus();
+                }
+                let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let save = ui.button(t::ic::CHECK).on_hover_text("Save key").clicked();
+                let cancel = ui.button(t::ic::CLOSE).on_hover_text("Cancel").clicked();
+                if save || submit {
+                    let v = jira_buf.trim().to_string();
+                    action = Some(BeadAction::SetExternalRef((!v.is_empty()).then_some(v)));
+                    editing_jira = false;
+                } else if cancel {
+                    editing_jira = false;
+                }
+            } else if let Some(key) = external_key(&i) {
+                ui.label(RichText::new(key).size(t::FS_SMALL).strong().color(p.primary));
+                if ui.button("Edit").on_hover_text("Edit key").clicked() {
+                    jira_buf = i.external_ref.clone().unwrap_or_default();
+                    editing_jira = true;
+                    request_focus_jira = true;
+                }
+                if ui.button(t::ic::CLOSE).on_hover_text("Clear key").clicked() {
+                    action = Some(BeadAction::SetExternalRef(None));
+                }
+            } else if ui
+                .button(format!("{} Link {ref_label}", t::ic::PLUS))
+                .on_hover_text(format!("Attach a {ref_label} key to this bead"))
+                .clicked()
+            {
+                jira_buf = String::new();
+                editing_jira = true;
+                request_focus_jira = true;
+            }
+        });
+        self.jira_buf = jira_buf;
+        self.editing_jira = editing_jira;
+        self.focus_jira = request_focus_jira;
+
         if let Some(err) = self.action_error.clone() {
             ui.colored_label(p.red_d, format!("{} {err}", t::ic::WARNING));
         }
@@ -236,6 +313,9 @@ impl App {
                 BeadAction::Assignee(None) => self.bd_update(&id, "--assignee", ""),
                 BeadAction::Backlog => self.bd_update(&id, "--priority", "4"),
                 BeadAction::SetRelease(new) => self.set_release(&id, cur_release.clone(), new),
+                BeadAction::SetExternalRef(v) => {
+                    self.bd_update(&id, "--external-ref", &v.unwrap_or_default())
+                }
                 BeadAction::ArchiveToggle(now) => {
                     // Cascade to children when this is an epic; unarchive reverses it.
                     self.set_archived(&[id.clone()], !now);

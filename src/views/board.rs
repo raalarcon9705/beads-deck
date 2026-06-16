@@ -12,6 +12,8 @@ impl App {
     pub(crate) fn board_view(&mut self, ui: &mut egui::Ui) {
         let mut clicked: Option<String> = None;
         let mut toggled: Option<String> = None;
+        // Visual top→bottom, left→right order of cards (for shift range-select).
+        let mut order: Vec<String> = Vec::new();
         let col_h = ui.available_height();
         let cols = self.board_columns();
 
@@ -84,6 +86,7 @@ impl App {
                                 .show(ui, |ui| {
                                     ui.set_width(t::COL_W - 4.0);
                                     for i in &items {
+                                        order.push(i.id.clone());
                                         match self.draggable_card(ui, i) {
                                             Some(RowAction::Open) => clicked = Some(i.id.clone()),
                                             Some(RowAction::Toggle) => toggled = Some(i.id.clone()),
@@ -109,21 +112,34 @@ impl App {
                         let current = self.issues.iter().find(|i| i.id == *bead_id)
                             .map(|i| i.status.clone()).unwrap_or_default();
                         if *target_status != current {
-                            // Optimistic: move card in UI immediately, sync in background.
-                            self.optimistic_status(&bead_id, target_status);
-                            self.run_cmd_optimistic(
-                                "bd",
-                                vec!["update".into(), (*bead_id).clone(), "--status".into(), target_status.clone()],
-                                Some((*bead_id).clone()),
-                            );
+                            // Reject moves the workflow schema marks illegal. With
+                            // no transitions configured this is always allowed, so
+                            // unknown workflows stay fully draggable.
+                            if !crate::schema::wf().can_transition(&current, target_status) {
+                                self.action_error = Some(format!(
+                                    "Illegal transition: {} → {}",
+                                    t::status_style(&current).label,
+                                    t::status_style(target_status).label
+                                ));
+                            } else {
+                                // Optimistic: move card in UI immediately, sync in background.
+                                self.optimistic_status(&bead_id, target_status);
+                                self.run_cmd_optimistic(
+                                    "bd",
+                                    vec!["update".into(), (*bead_id).clone(), "--status".into(), target_status.clone()],
+                                    Some((*bead_id).clone()),
+                                );
+                            }
                         }
                     }
                 }
             }
         }
 
+        self.visible_order = order;
         if let Some(id) = toggled {
-            self.toggle_select(id);
+            let shift = ui.input(|i| i.modifiers.shift);
+            self.apply_select(id, shift);
         }
         if let Some(id) = clicked {
             self.select(id);
@@ -138,6 +154,9 @@ impl App {
             .map(|pay| *pay == i.id).unwrap_or(false);
 
         // Render the card content, faded if it's the one being dragged.
+        // `id_rect` captures the clickable id label's rect so the full-card
+        // overlay below can detect (and prioritize) a click on the id.
+        let mut id_rect = egui::Rect::NOTHING;
         let opacity = if is_being_dragged { 0.35 } else { 1.0 };
         let card_resp = ui.add_enabled_ui(true, |ui| {
             ui.set_opacity(opacity);
@@ -161,7 +180,14 @@ impl App {
                 ui.horizontal(|ui| {
                     let (glyph, tc) = t::type_glyph(&i.issue_type);
                     ui.label(RichText::new(glyph).color(tc));
-                    t::copyable_id(ui, &i.id, t::FS_CAPTION);
+                    id_rect = t::copyable_id(ui, &i.id, t::FS_CAPTION).rect;
+                    if let Some(key) = external_key(i) {
+                        ui.label(
+                            RichText::new(format!("{} {key}", crate::schema::wf().ref_label()))
+                                .size(t::FS_CAPTION)
+                                .color(p.primary),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(a) = i.assignee.as_deref().filter(|a| !a.is_empty()) {
                             t::avatar(ui, a, 18.0);
@@ -178,6 +204,16 @@ impl App {
             }).response
         }).inner;
 
+        // A click that landed on the id label's rect means "copy id" — handle it
+        // here with priority, since the full-card overlay below would otherwise
+        // shadow the id label and swallow its click.
+        let clicked_id = |resp: &egui::Response| {
+            resp.clicked()
+                && resp
+                    .interact_pointer_pos()
+                    .is_some_and(|pos| id_rect.contains(pos))
+        };
+
         // In select mode the card is a selection target, not draggable: a click
         // anywhere on it toggles membership in the bulk selection.
         if self.select_mode {
@@ -186,6 +222,10 @@ impl App {
                 egui::Id::new(("card_sel", &i.id)),
                 egui::Sense::click(),
             );
+            if clicked_id(&resp) {
+                t::copy_id_to_clipboard(ui, &i.id);
+                return None;
+            }
             return resp.clicked().then_some(RowAction::Toggle);
         }
 
@@ -196,6 +236,13 @@ impl App {
             egui::Id::new(("card_drag", &i.id)),
             egui::Sense::click_and_drag(),
         );
+
+        // Click on the id rect copies instead of opening (drag is unaffected:
+        // a drag is a press+move, not a click).
+        if clicked_id(&drag_resp) {
+            t::copy_id_to_clipboard(ui, &i.id);
+            return None;
+        }
 
         if drag_resp.drag_started() {
             egui::DragAndDrop::set_payload(ui.ctx(), i.id.clone());

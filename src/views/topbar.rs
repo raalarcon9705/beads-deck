@@ -12,6 +12,8 @@ impl App {
         let p = t::pal();
         let statuses = self.selectable_statuses();
         let roster = self.agent_roster();
+        let releases = self.releases();
+        let ref_label = crate::schema::wf().ref_label().to_string();
         egui::TopBottomPanel::top("top")
             .frame(egui::Frame::none().fill(p.surface).inner_margin(Margin::symmetric(12.0, 8.0)))
             .show(ctx, |ui| {
@@ -43,6 +45,13 @@ impl App {
                     if ui.button(format!("{} Reload", t::ic::RELOAD)).clicked() {
                         self.reload();
                     }
+                    if ui
+                        .button(format!("{} Workflow", t::ic::CHORE))
+                        .on_hover_text("Edit the workflow schema (states, colors, transitions, roles)")
+                        .clicked()
+                    {
+                        self.open_workflow_editor();
+                    }
                     let live_color = if self.live { p.green } else { p.text_sub };
                     if ui
                         .selectable_label(self.live, RichText::new(format!("{} Live", t::ic::LIVE)).color(live_color))
@@ -59,6 +68,7 @@ impl App {
                         self.select_mode = !self.select_mode;
                         if !self.select_mode {
                             self.selected_ids.clear();
+                            self.select_anchor = None;
                         }
                     }
                     if self.loading_list {
@@ -100,7 +110,7 @@ impl App {
                                 ui.label(RichText::new(t::ic::SEARCH).color(p.text_sub));
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.search)
-                                        .hint_text("Search by title or ID…")
+                                        .hint_text("Search title, ID or Jira key…")
                                         .desired_width(220.0)
                                         .frame(false),
                                 );
@@ -150,6 +160,34 @@ impl App {
                             }
                         });
 
+                    egui::ComboBox::from_id_salt("rel")
+                        .width(140.0)
+                        .selected_text(
+                            self.filter_release
+                                .clone()
+                                .map(|r| format!("{} {r}", t::ic::RELEASE))
+                                .unwrap_or_else(|| "All Releases".into()),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.filter_release, None, "All Releases");
+                            for r in &releases {
+                                ui.selectable_value(&mut self.filter_release, Some(r.clone()), format!("{} {r}", t::ic::RELEASE));
+                            }
+                        });
+
+                    egui::ComboBox::from_id_salt("jira")
+                        .width(120.0)
+                        .selected_text(match self.filter_jira {
+                            None => format!("All {ref_label}"),
+                            Some(true) => format!("Has {ref_label}"),
+                            Some(false) => format!("No {ref_label}"),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.filter_jira, None, format!("All {ref_label}"));
+                            ui.selectable_value(&mut self.filter_jira, Some(true), format!("Has {ref_label}"));
+                            ui.selectable_value(&mut self.filter_jira, Some(false), format!("No {ref_label}"));
+                        });
+
                     ui.add_space(t::SP_SM);
                     ui.label(RichText::new(t::ic::SORT).color(p.text_sub));
                     egui::ComboBox::from_id_salt("sort")
@@ -170,12 +208,16 @@ impl App {
                     if self.filter_status.is_some()
                         || self.filter_priority.is_some()
                         || self.filter_assignee.is_some()
+                        || self.filter_release.is_some()
+                        || self.filter_jira.is_some()
                         || !self.search.is_empty()
                     {
                         if ui.button("Clear").clicked() {
                             self.filter_status = None;
                             self.filter_priority = None;
                             self.filter_assignee = None;
+                            self.filter_release = None;
+                            self.filter_jira = None;
                             self.search.clear();
                         }
                     }

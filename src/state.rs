@@ -1,6 +1,7 @@
 //! UI state enums and the background-thread message type.
 
 use crate::bd::{HistoryEntry, Interaction, Issue, StatusDef};
+use crate::schema::WorkflowSchema;
 
 /// What a clickable card/row did this frame.
 pub(crate) enum RowAction {
@@ -37,6 +38,7 @@ pub(crate) enum Msg {
         events: Vec<Interaction>,
         roles: Vec<String>,
         statuses: Vec<StatusDef>,
+        schema: WorkflowSchema,
     },
     Detail {
         id: String,
@@ -90,5 +92,7 @@ pub(crate) enum BeadAction {
     Backlog,
     /// Move the bead to a release (Some) or clear its release (None).
     SetRelease(Option<String>),
+    /// Set the external-tracker key (Some) or clear it (None).
+    SetExternalRef(Option<String>),
     Delete,
 }

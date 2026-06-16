@@ -9,3 +9,4 @@ pub(crate) mod releases;
 pub(crate) mod selector;
 pub(crate) mod topbar;
 pub(crate) mod tree;
+pub(crate) mod workflow_editor;

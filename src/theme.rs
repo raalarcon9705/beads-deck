@@ -178,38 +178,85 @@ pub fn title_case(s: &str) -> String {
         .join(" ")
 }
 
-/// Label map + colors for the workflow states in the strata project.
+/// Map a named color token to a (fg, bg) lozenge pair in the active palette.
+/// `None` for unknown tokens so callers can fall back to a hashed color.
+fn token_pair(token: &str, p: &Palette) -> Option<(Color32, Color32)> {
+    Some(match token {
+        "blue" => (p.blue_d, p.blue_t),
+        "green" => (p.green_d, p.green_t),
+        "red" => (p.red_d, p.red_t),
+        "amber" | "yellow" => (p.amber_d, p.yellow_t),
+        "purple" => (p.purple_d, p.purple_t),
+        "teal" => (p.teal_d, p.teal_t),
+        "muted" => (p.muted, p.neutral_t),
+        "neutral" => (p.text_sub, p.neutral_t),
+        _ => return None,
+    })
+}
+
+/// Stable distinct accent derived from a name, for states with no configured
+/// color (FNV-1a → one of the palette accent pairs).
+fn hash_pair(name: &str, p: &Palette) -> (Color32, Color32) {
+    let pairs = [
+        (p.blue_d, p.blue_t),
+        (p.green_d, p.green_t),
+        (p.red_d, p.red_t),
+        (p.amber_d, p.yellow_t),
+        (p.purple_d, p.purple_t),
+        (p.teal_d, p.teal_t),
+    ];
+    let mut h: u32 = 2166136261;
+    for b in name.bytes() {
+        h = (h ^ b as u32).wrapping_mul(16777619);
+    }
+    pairs[(h as usize) % pairs.len()]
+}
+
+/// Default (label, color-token) for bd's UNIVERSAL built-in statuses only —
+/// these come from bd itself, not from any workflow, so styling them out of the
+/// box doesn't tie the deck to a workflow. Custom/workflow states get their
+/// look from the workflow schema (or a hashed color when unconfigured).
+fn builtin_default(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        "open" => ("To Do", "neutral"),
+        "in_progress" => ("In Progress", "blue"),
+        "blocked" => ("Blocked", "red"),
+        "closed" => ("Done", "green"),
+        "deferred" => ("Deferred", "muted"),
+        "pinned" => ("Pinned", "purple"),
+        "hooked" => ("Hooked", "teal"),
+        _ => return None,
+    })
+}
+
+/// Label + colors for a status, fully data-driven. Precedence: workflow schema
+/// (label/color) → bd built-in default → hashed color with a title-cased label.
+/// No workflow-specific state is hard-coded here.
 pub fn status_style(s: &str) -> Style {
     let p = pal();
-    let (label, fg, bg) = match s {
-        "open" => ("To Do", p.text_sub, p.neutral_t),
-        "in_progress" => ("In Progress", p.blue_d, p.blue_t),
-        "blocked" => ("Blocked", p.red_d, p.red_t),
-        "ready_for_qa" => ("Ready for QA", p.amber_d, p.yellow_t),
-        "in_qa" => ("In QA", p.amber_d, p.yellow_t),
-        "qa_passed" => ("QA Passed", p.teal_d, p.teal_t),
-        "ready_to_ship" => ("Ready to Ship", p.purple_d, p.purple_t),
-        "closed" => ("Done", p.green_d, p.green_t),
-        "deferred" => ("Deferred", p.muted, p.neutral_t),
-        // Unknown/custom status: stable distinct accent derived from the name.
-        other => {
-            let pairs = [
-                (p.blue_d, p.blue_t),
-                (p.green_d, p.green_t),
-                (p.red_d, p.red_t),
-                (p.amber_d, p.yellow_t),
-                (p.purple_d, p.purple_t),
-                (p.teal_d, p.teal_t),
-            ];
-            let mut h: u32 = 2166136261;
-            for b in other.bytes() {
-                h = (h ^ b as u32).wrapping_mul(16777619);
-            }
-            let (fg, bg) = pairs[(h as usize) % pairs.len()];
-            return Style { label: title_case(other), fg, bg };
+    let schema = crate::schema::wf();
+
+    // 1. Workflow schema wins.
+    if let Some(st) = schema.state(s) {
+        let label = st.label.clone().unwrap_or_else(|| title_case(s));
+        let (fg, bg) = st
+            .color
+            .as_deref()
+            .and_then(|c| token_pair(c, &p))
+            .unwrap_or_else(|| hash_pair(s, &p));
+        return Style { label, fg, bg };
+    }
+
+    // 2. bd universal built-ins (generic, not workflow-specific).
+    if let Some((label, token)) = builtin_default(s) {
+        if let Some((fg, bg)) = token_pair(token, &p) {
+            return Style { label: label.to_string(), fg, bg };
         }
-    };
-    Style { label: label.to_string(), fg, bg }
+    }
+
+    // 3. Unknown custom state with no schema entry: hashed accent + title-case.
+    let (fg, bg) = hash_pair(s, &p);
+    Style { label: title_case(s), fg, bg }
 }
 
 pub fn priority_style(prio: i64) -> Style {
@@ -275,9 +322,52 @@ pub fn bead_link(ui: &mut Ui, id: &str) -> bool {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
+/// How long the "Copied!" confirmation stays visible after a copy, in seconds.
+const COPIED_FEEDBACK_SECS: f64 = 1.2;
+
+/// egui temp-memory key holding the (id, time) of the most recent copy.
+fn copied_marker_id() -> egui::Id {
+    egui::Id::new("copyable_id__last_copied")
+}
+
+/// Write `id` to the system clipboard and record a transient "Copied!" marker
+/// so the UI can show confirmation for ~`COPIED_FEEDBACK_SECS`.
+///
+/// Use this from a parent widget (board card / tree row) when the click landed
+/// on the id rect but the id label itself is shadowed by a full-rect overlay.
+pub fn copy_id_to_clipboard(ui: &mut Ui, id: &str) {
+    ui.output_mut(|o| o.copied_text = id.to_string());
+    let now = ui.ctx().input(|i| i.time);
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(copied_marker_id(), (id.to_string(), now)));
+}
+
+/// True if `id` was copied within the last `COPIED_FEEDBACK_SECS` seconds.
+/// When true, schedules a repaint so the confirmation auto-clears.
+fn recently_copied(ui: &Ui, id: &str) -> bool {
+    let now = ui.ctx().input(|i| i.time);
+    let marker: Option<(String, f64)> =
+        ui.ctx().data(|d| d.get_temp(copied_marker_id()));
+    if let Some((copied_id, t)) = marker {
+        let remaining = COPIED_FEEDBACK_SECS - (now - t);
+        if copied_id == id && remaining > 0.0 {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(remaining.max(0.05)));
+            return true;
+        }
+    }
+    false
+}
+
 /// Render a bead id as a monospace label that copies the id to the clipboard
-/// when clicked (with a hover hint).
-pub fn copyable_id(ui: &mut Ui, id: &str, size: f32) {
+/// when clicked (with a hover hint). Returns the label's `Response` so callers
+/// whose id label is covered by a full-rect overlay (board cards, tree rows)
+/// can detect a click on the id rect and copy via [`copy_id_to_clipboard`].
+///
+/// A direct left-click here (e.g. the standalone detail header) copies and shows
+/// a transient "✓ Copied!" confirmation.
+pub fn copyable_id(ui: &mut Ui, id: &str, size: f32) -> egui::Response {
+    let copied = recently_copied(ui, id);
     let resp = ui
         .add(
             egui::Label::new(RichText::new(id).monospace().size(size).color(pal().text_sub))
@@ -286,8 +376,30 @@ pub fn copyable_id(ui: &mut Ui, id: &str, size: f32) {
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text("Click to copy id");
     if resp.clicked() {
-        ui.output_mut(|o| o.copied_text = id.to_string());
+        copy_id_to_clipboard(ui, id);
     }
+    if copied {
+        show_copied_badge(ui, resp.rect);
+    }
+    resp
+}
+
+/// Draw a small transient "✓ Copied!" badge anchored to the right of `anchor`
+/// (the id rect). Painted on a foreground layer so it is visible over card /
+/// row overlays. Auto-disappears once the marker expires (see `recently_copied`).
+fn show_copied_badge(ui: &Ui, anchor: egui::Rect) {
+    let p = pal();
+    let pos = anchor.right_top() + egui::vec2(6.0, 0.0);
+    let layer = egui::LayerId::new(egui::Order::Tooltip, copied_marker_id());
+    let painter = ui.ctx().layer_painter(layer);
+    let text = format!("{} Copied!", ic::CHECK);
+    let font = egui::FontId::proportional(FS_CAPTION);
+    let galley = painter.layout_no_wrap(text, font, p.green);
+    let pad = egui::vec2(6.0, 3.0);
+    let rect = egui::Rect::from_min_size(pos, galley.size() + pad * 2.0);
+    painter.rect_filled(rect, R_SM, p.surface);
+    painter.rect_stroke(rect, R_SM, egui::Stroke::new(1.0, p.green));
+    painter.galley(rect.min + pad, galley, p.green);
 }
 
 pub fn status_lozenge(ui: &mut Ui, status: &str) {
@@ -370,7 +482,8 @@ pub mod ic {
         MAGNIFYING_GLASS as SEARCH, MOON, PLUS, PROHIBIT as BLOCKED, ROCKET as RELEASE,
         SPARKLE as FEATURE, SQUARE as UNCHECKED, SQUARES_FOUR as BOARD, STACK as EPICS, SUN,
         TRASH as DELETE,
-        TRAY as BACKLOG, TREE_STRUCTURE as TREE, WARNING, WRENCH as CHORE, X as CLOSE,
+        TRAY as BACKLOG, TREE_STRUCTURE as TREE, USER as AGENT, WARNING, WRENCH as CHORE,
+        X as CLOSE, CARET_DOWN, CARET_UP,
     };
 }
 

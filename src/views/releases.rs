@@ -28,6 +28,7 @@ impl App {
         let mut clicked: Option<String> = None;
         let mut toggled: Option<String> = None;
         let mut convert: Option<String> = None;
+        let mut order: Vec<String> = Vec::new();
         egui::Frame::none()
             .fill(p.surface)
             .rounding(Rounding::same(t::R_LG))
@@ -88,6 +89,7 @@ impl App {
                                     ui.add_space(t::SP_XS);
                                 }
                                 for &i in &visible {
+                                    order.push(self.issues[i].id.clone());
                                     match self.tree_row(ui, &self.issues[i]) {
                                         Some(RowAction::Open) => clicked = Some(self.issues[i].id.clone()),
                                         Some(RowAction::Toggle) => toggled = Some(self.issues[i].id.clone()),
@@ -99,8 +101,10 @@ impl App {
                     });
             });
 
+        self.visible_order = order;
         if let Some(id) = toggled {
-            self.toggle_select(id);
+            let shift = ui.input(|i| i.modifiers.shift);
+            self.apply_select(id, shift);
         }
         if let Some(id) = clicked {
             self.select(id);

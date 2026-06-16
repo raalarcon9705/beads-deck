@@ -41,10 +41,19 @@ pub(crate) struct App {
     pub(crate) roles: Vec<String>,
     /// Valid workflow statuses (built-in + custom) from `bd statuses`.
     pub(crate) workflow_statuses: Vec<crate::bd::StatusDef>,
+    /// Workflow schema (labels/colors/order/transitions/roles/hierarchy) from
+    /// `.beads/deck-workflow.json`. Empty → fallback behavior. Published to the
+    /// `crate::schema` thread-local each frame so the free helpers can read it.
+    pub(crate) workflow_schema: std::rc::Rc<crate::schema::WorkflowSchema>,
     /// Bulk-selection mode: cards/rows show checkboxes and a floating action bar.
     pub(crate) select_mode: bool,
     /// Beads currently selected for a bulk action.
     pub(crate) selected_ids: std::collections::HashSet<String>,
+    /// Anchor for OS-style shift range-select (last bead toggled without shift).
+    pub(crate) select_anchor: Option<String>,
+    /// Flat top→bottom visual order of selectable beads in the active view,
+    /// rebuilt each frame; used to resolve shift range-selection.
+    pub(crate) visible_order: Vec<String>,
     /// Pending confirmation for a bulk delete.
     pub(crate) confirm_bulk_delete: bool,
     pub(crate) action_error: Option<String>,
@@ -67,6 +76,13 @@ pub(crate) struct App {
     pub(crate) adding_release: bool,
     /// One-shot: request focus on the new-release field on the next frame.
     pub(crate) focus_release: bool,
+    /// Buffer / state for the inline external-ref (Jira key) editor in detail.
+    pub(crate) jira_buf: String,
+    pub(crate) editing_jira: bool,
+    pub(crate) focus_jira: bool,
+    /// Workflow editor modal: open flag + the working copy being edited.
+    pub(crate) show_workflow_editor: bool,
+    pub(crate) editing_schema: crate::schema::WorkflowSchema,
     /// Release name pending "convert to epic" confirmation.
     pub(crate) confirm_convert: Option<String>,
     pub(crate) list_error: Option<String>,
@@ -76,6 +92,10 @@ pub(crate) struct App {
     pub(crate) filter_status: Option<String>,
     pub(crate) filter_priority: Option<i64>,
     pub(crate) filter_assignee: Option<String>,
+    /// Filter by release name (`release:<name>` label). None = all.
+    pub(crate) filter_release: Option<String>,
+    /// Filter by external-tracker key presence: Some(true)=has, Some(false)=none.
+    pub(crate) filter_jira: Option<bool>,
     pub(crate) sort: Sort,
     pub(crate) view: View,
     pub(crate) theme_mode: ThemeMode,
@@ -138,8 +158,11 @@ impl App {
             board_col_rects: std::collections::HashMap::new(),
             roles: Vec::new(),
             workflow_statuses: Vec::new(),
+            workflow_schema: std::rc::Rc::new(crate::schema::WorkflowSchema::default()),
             select_mode: false,
             selected_ids: std::collections::HashSet::new(),
+            select_anchor: None,
+            visible_order: Vec::new(),
             confirm_bulk_delete: false,
             action_error: None,
             confirm_delete: None,
@@ -158,6 +181,11 @@ impl App {
             release_buf: String::new(),
             adding_release: false,
             focus_release: false,
+            jira_buf: String::new(),
+            editing_jira: false,
+            focus_jira: false,
+            show_workflow_editor: false,
+            editing_schema: crate::schema::WorkflowSchema::default(),
             confirm_convert: None,
             list_error: None,
             loading_list: false,
@@ -165,6 +193,8 @@ impl App {
             filter_status: None,
             filter_priority: None,
             filter_assignee: None,
+            filter_release: None,
+            filter_jira: None,
             sort: Sort::Priority,
             view: View::Board,
             theme_mode: ThemeMode::Auto,
@@ -285,11 +315,16 @@ impl App {
                 let ws = ws.clone();
                 thread::spawn(move || bd::workflow_statuses(&ws))
             };
+            let h_schema = {
+                let ws = ws.clone();
+                thread::spawn(move || crate::schema::read_workflow_schema(&ws))
+            };
             let events = bd::read_interactions(&ws);
             let issues = h_issues.join().unwrap_or_else(|_| Ok(Vec::new()));
             let roles = h_roles.join().unwrap_or_default();
             let statuses = h_statuses.join().unwrap_or_default();
-            let _ = tx.send(Msg::Loaded { issues, events, roles, statuses });
+            let schema = h_schema.join().unwrap_or_default();
+            let _ = tx.send(Msg::Loaded { issues, events, roles, statuses, schema });
             ctx.request_repaint();
         });
     }
@@ -408,6 +443,48 @@ impl App {
         self.run_cmd_optimistic("bd", args, None);
     }
 
+    /// Open the workflow editor, seeding the working copy from the loaded schema
+    /// — or synthesizing one from `bd statuses` when no schema file exists yet,
+    /// so the user always starts from the workspace's real states.
+    pub(crate) fn open_workflow_editor(&mut self) {
+        let mut s = (*self.workflow_schema).clone();
+        if s.states.is_empty() {
+            s.states = self
+                .workflow_statuses
+                .iter()
+                .map(|sd| crate::schema::StateDef {
+                    name: sd.name.clone(),
+                    label: None,
+                    color: None,
+                    category: (!sd.category.is_empty() && sd.category != "unspecified")
+                        .then(|| sd.category.clone()),
+                    side: false,
+                    owner: None,
+                })
+                .collect();
+        }
+        self.editing_schema = s;
+        self.show_workflow_editor = true;
+        self.action_error = None;
+    }
+
+    /// Serialize the edited schema to `.beads/deck-workflow.json` and reload so
+    /// the change takes effect immediately.
+    pub(crate) fn save_workflow_schema(&mut self) {
+        self.editing_schema.states.retain(|s| !s.name.trim().is_empty());
+        let path = format!("{}/.beads/deck-workflow.json", self.workspace);
+        match serde_json::to_string_pretty(&self.editing_schema) {
+            Ok(json) => match std::fs::write(&path, json) {
+                Ok(_) => {
+                    self.show_workflow_editor = false;
+                    self.reload();
+                }
+                Err(e) => self.action_error = Some(format!("write deck-workflow.json: {e}")),
+            },
+            Err(e) => self.action_error = Some(format!("serialize schema: {e}")),
+        }
+    }
+
     /// Roster of selectable agents: initech roles ∪ assignees, sorted.
     pub(crate) fn agent_roster(&self) -> Vec<String> {
         let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -485,14 +562,39 @@ impl App {
         }
     }
 
+    /// Resolve a selection click in select-mode, OS-style:
+    /// - shift + a prior anchor → select the inclusive range between the anchor
+    ///   and the clicked bead in the current visual order (anchor preserved);
+    /// - otherwise → toggle the bead and set it as the new anchor.
+    pub(crate) fn apply_select(&mut self, id: String, shift: bool) {
+        if shift {
+            if let Some(anchor) = self.select_anchor.clone() {
+                let a = self.visible_order.iter().position(|x| *x == anchor);
+                let b = self.visible_order.iter().position(|x| *x == id);
+                if let (Some(a), Some(b)) = (a, b) {
+                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                    let range: Vec<String> = self.visible_order[lo..=hi].to_vec();
+                    for x in range {
+                        self.selected_ids.insert(x);
+                    }
+                    return; // anchor stays put for further range extension
+                }
+            }
+        }
+        self.toggle_select(id.clone());
+        self.select_anchor = self.selected_ids.contains(&id).then_some(id);
+    }
+
     pub(crate) fn drain(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Loaded { issues, events, roles, statuses } => {
+                Msg::Loaded { issues, events, roles, statuses, schema } => {
                     self.loading_list = false;
                     self.events = events;
                     self.roles = roles;
                     self.workflow_statuses = statuses;
+                    self.workflow_schema = std::rc::Rc::new(schema);
+                    crate::schema::set_wf(self.workflow_schema.clone());
                     // Comment index is now stale relative to the new data; it is
                     // rebuilt lazily the next time a search is active.
                     self.comment_index_loaded = false;
@@ -634,6 +736,9 @@ impl eframe::App for App {
         }
         if self.show_add_bead {
             self.add_bead_modal(ctx);
+        }
+        if self.show_workflow_editor {
+            self.workflow_editor_modal(ctx);
         }
     }
 }

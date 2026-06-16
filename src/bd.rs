@@ -33,6 +33,10 @@ pub struct Issue {
     pub close_reason: Option<String>,
     #[serde(default)]
     pub parent: Option<String>,
+    /// External-tracker key (e.g. `jira-ST-1236`). Surfaced on cards/detail and
+    /// made searchable; the display label comes from the workflow schema.
+    #[serde(default)]
+    pub external_ref: Option<String>,
     /// Present in `bd list`/`show` JSON only when the bead has labels.
     #[serde(default)]
     pub labels: Vec<String>,

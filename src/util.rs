@@ -27,19 +27,33 @@ pub(crate) fn is_closed(i: &Issue) -> bool {
     i.status == "closed" || i.closed_at.is_some()
 }
 
+/// The external-tracker key for display, with a redundant `<label>-` prefix
+/// stripped (e.g. `jira-ST-1236` → `ST-1236` when the label is "Jira"). None
+/// when the bead has no external_ref.
+pub(crate) fn external_key(i: &Issue) -> Option<String> {
+    let raw = i.external_ref.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    let prefix = format!("{}-", crate::schema::wf().ref_label().to_lowercase());
+    let key = raw.strip_prefix(prefix.as_str()).unwrap_or(raw);
+    Some(key.to_string())
+}
+
+/// Fallback pipeline order used ONLY when no workflow schema is configured.
+/// Generic bd built-ins, no workflow-specific states.
 pub(crate) const STATUS_ORDER: &[&str] = &[
     "open",
     "in_progress",
     "blocked",
-    "ready_for_qa",
-    "in_qa",
-    "qa_passed",
-    "ready_to_ship",
     "closed",
     "deferred",
 ];
 
+/// Pipeline rank for a status: from the workflow schema's order when one is
+/// configured (unknown states sort last), otherwise the generic fallback.
 pub(crate) fn status_rank(s: &str) -> usize {
+    let schema = crate::schema::wf();
+    if !schema.is_empty() {
+        return schema.order(s);
+    }
     STATUS_ORDER.iter().position(|x| *x == s).unwrap_or(99)
 }
 

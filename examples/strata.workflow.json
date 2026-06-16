@@ -1,0 +1,45 @@
+{
+  "_comment": "Example workflow schema (initech-strata / Engineering Atlas mirror). Drop a file like this at <workspace>/.beads/deck-workflow.json to drive Beads Deck. Everything here is data — the deck hard-codes none of it. Delete the file and the deck falls back to bd statuses + built-in styling.",
+  "external_ref_label": "Jira",
+  "hierarchy": {
+    "levels": ["epic", "user_story", "task", "subtask"],
+    "ships_at": "user_story"
+  },
+  "states": [
+    { "name": "open",         "label": "To Do",        "color": "neutral", "category": "active", "owner": "super" },
+    { "name": "in_progress",  "label": "In Progress",  "color": "blue",    "category": "wip",    "owner": "eng" },
+    { "name": "ready_for_qa", "label": "Ready for QA", "color": "amber",   "category": "wip",    "owner": "eng" },
+    { "name": "in_qa",        "label": "In QA",        "color": "purple",  "category": "wip",    "owner": "qa" },
+    { "name": "qa_passed",    "label": "QA Passed",    "color": "teal",    "category": "wip",    "owner": "qa" },
+    { "name": "closed",       "label": "Done",         "color": "green",   "category": "done",   "owner": "super" },
+    { "name": "blocked",      "label": "Blocked",      "color": "red",     "category": "wip",    "owner": "eng",   "side": true },
+    { "name": "deferred",     "label": "Deferred",     "color": "muted",   "category": "frozen", "owner": "super", "side": true }
+  ],
+  "transitions": [
+    { "from": "open",         "to": "in_progress",  "role": "eng" },
+    { "from": "open",         "to": "blocked",      "role": "eng" },
+    { "from": "open",         "to": "deferred",     "role": "super" },
+    { "from": "open",         "to": "closed",       "role": "super" },
+    { "from": "in_progress",  "to": "ready_for_qa", "role": "eng" },
+    { "from": "in_progress",  "to": "blocked",      "role": "eng" },
+    { "from": "in_progress",  "to": "open",         "role": "eng" },
+    { "from": "in_progress",  "to": "closed",       "role": "super" },
+    { "from": "blocked",      "to": "in_progress",  "role": "eng" },
+    { "from": "blocked",      "to": "open",         "role": "eng" },
+    { "from": "blocked",      "to": "closed",       "role": "super" },
+    { "from": "deferred",     "to": "open",         "role": "super" },
+    { "from": "deferred",     "to": "in_progress",  "role": "super" },
+    { "from": "deferred",     "to": "closed",       "role": "super" },
+    { "from": "ready_for_qa", "to": "in_qa",        "role": "qa" },
+    { "from": "ready_for_qa", "to": "in_progress",  "role": "eng" },
+    { "from": "ready_for_qa", "to": "blocked",      "role": "eng" },
+    { "from": "ready_for_qa", "to": "closed",       "role": "super" },
+    { "from": "in_qa",        "to": "qa_passed",    "role": "qa" },
+    { "from": "in_qa",        "to": "in_progress",  "role": "qa" },
+    { "from": "in_qa",        "to": "blocked",      "role": "qa" },
+    { "from": "in_qa",        "to": "closed",       "role": "super" },
+    { "from": "qa_passed",    "to": "in_progress",  "role": "eng" },
+    { "from": "qa_passed",    "to": "closed",       "role": "super" },
+    { "from": "closed",       "to": "open",         "role": "super" }
+  ]
+}

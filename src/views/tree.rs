@@ -54,6 +54,8 @@ impl App {
 
         let mut clicked: Option<String> = None;
         let mut toggled: Option<String> = None;
+        // Visual order of selectable rows (for shift range-select).
+        let mut order: Vec<String> = Vec::new();
         egui::Frame::none()
             .fill(p.surface)
             .rounding(Rounding::same(t::R_LG))
@@ -67,17 +69,18 @@ impl App {
 
                         tree_group(ui, t::ic::EPICS, "Epics", epics_n, true, |ui| {
                             for &r in &epic_roots {
-                                self.tree_node(ui, r, &children, &mut clicked, &mut toggled);
+                                self.tree_node(ui, r, &children, &mut clicked, &mut toggled, &mut order);
                             }
                         });
                         tree_group(ui, t::ic::LOOSE, "Loose Beads", loose_n, false, |ui| {
                             for &r in &loose_roots {
-                                self.tree_node(ui, r, &children, &mut clicked, &mut toggled);
+                                self.tree_node(ui, r, &children, &mut clicked, &mut toggled, &mut order);
                             }
                         });
                         tree_group(ui, t::ic::BACKLOG, "Backlog", backlog_n, false, |ui| {
                             for &i in &backlog {
                                 if self.passes_filter(&self.issues[i]) {
+                                    order.push(self.issues[i].id.clone());
                                     match self.tree_row(ui, &self.issues[i]) {
                                         Some(RowAction::Open) => clicked = Some(self.issues[i].id.clone()),
                                         Some(RowAction::Toggle) => toggled = Some(self.issues[i].id.clone()),
@@ -89,6 +92,7 @@ impl App {
                         tree_group(ui, t::ic::ARCHIVE, "Archived", archived_n, false, |ui| {
                             for &i in &archived {
                                 if self.passes_filter(&self.issues[i]) {
+                                    order.push(self.issues[i].id.clone());
                                     match self.tree_row(ui, &self.issues[i]) {
                                         Some(RowAction::Open) => clicked = Some(self.issues[i].id.clone()),
                                         Some(RowAction::Toggle) => toggled = Some(self.issues[i].id.clone()),
@@ -99,8 +103,10 @@ impl App {
                         });
                     });
             });
+        self.visible_order = order;
         if let Some(id) = toggled {
-            self.toggle_select(id);
+            let shift = ui.input(|i| i.modifiers.shift);
+            self.apply_select(id, shift);
         }
         if let Some(id) = clicked {
             self.select(id);
@@ -125,6 +131,7 @@ impl App {
         children: &HashMap<String, Vec<usize>>,
         clicked: &mut Option<String>,
         toggled: &mut Option<String>,
+        order: &mut Vec<String>,
     ) {
         let i = &self.issues[idx];
         let kids = children.get(&i.id);
@@ -136,25 +143,35 @@ impl App {
             return;
         }
         if let Some(kids) = kids {
+            // The epic header is itself a selectable row; record it before its
+            // children so the shift-range order matches what's on screen.
+            order.push(i.id.clone());
             let (glyph, tc) = t::type_glyph(&i.issue_type);
-            egui::CollapsingHeader::new(
+            let header = egui::CollapsingHeader::new(
                 RichText::new(format!("{}  {}   {}", glyph, i.id, i.title)).color(tc).strong(),
             )
             .id_salt(&i.id)
             .default_open(true)
             .show(ui, |ui| {
-                if self.passes_filter(i) {
-                    match self.tree_row(ui, i) {
-                        Some(RowAction::Open) => *clicked = Some(i.id.clone()),
-                        Some(RowAction::Toggle) => *toggled = Some(i.id.clone()),
-                        None => {}
-                    }
-                }
+                // The epic itself is rendered ONLY as the header above — do not
+                // emit a `tree_row` for `i` here, or it would duplicate the epic
+                // as the first child of its own body.
                 for &c in kids {
-                    self.tree_node(ui, c, children, clicked, toggled);
+                    self.tree_node(ui, c, children, clicked, toggled, order);
                 }
             });
+            // A click on the header (the label area) should open the epic's detail
+            // panel — mirroring how `tree_row` decides between Open and Toggle.
+            // The triangle still toggles expand/collapse independently.
+            if header.header_response.clicked() {
+                if self.select_mode {
+                    *toggled = Some(i.id.clone());
+                } else {
+                    *clicked = Some(i.id.clone());
+                }
+            }
         } else if self.passes_filter(i) {
+            order.push(i.id.clone());
             match self.tree_row(ui, i) {
                 Some(RowAction::Open) => *clicked = Some(i.id.clone()),
                 Some(RowAction::Toggle) => *toggled = Some(i.id.clone()),
@@ -167,6 +184,9 @@ impl App {
         let p = t::pal();
         let selected = self.selected.as_deref() == Some(&i.id);
         let checked = self.selected_ids.contains(&i.id);
+        // Captures the id label's rect so the full-row overlay can detect (and
+        // prioritize) a click on the id.
+        let mut id_rect = egui::Rect::NOTHING;
         let resp = egui::Frame::none()
             .fill(if checked {
                 p.green_t
@@ -191,7 +211,7 @@ impl App {
                     ui.label(RichText::new(glyph).color(tc));
                     t::priority_lozenge(ui, i.priority);
                     t::status_lozenge(ui, &i.status);
-                    t::copyable_id(ui, &i.id, t::FS_CAPTION);
+                    id_rect = t::copyable_id(ui, &i.id, t::FS_CAPTION).rect;
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(a) = i.assignee.as_deref().filter(|a| !a.is_empty()) {
                             t::avatar(ui, a, 20.0);
@@ -206,7 +226,18 @@ impl App {
                 });
             })
             .response;
-        let clicked = resp.interact(egui::Sense::click()).clicked();
+        let row_resp = resp.interact(egui::Sense::click());
+        // A click on the id rect copies instead of opening/toggling; the row
+        // Frame's full-rect interaction would otherwise shadow the id label.
+        if row_resp.clicked()
+            && row_resp
+                .interact_pointer_pos()
+                .is_some_and(|pos| id_rect.contains(pos))
+        {
+            t::copy_id_to_clipboard(ui, &i.id);
+            return None;
+        }
+        let clicked = row_resp.clicked();
         if self.select_mode {
             // In select mode the whole row toggles selection (matches the board).
             return clicked.then_some(RowAction::Toggle);

@@ -2,17 +2,22 @@
 //! Tree / Releases) while beads are multi-selected, plus the bulk `bd` runners.
 
 use crate::app::App;
+use crate::bd;
+use crate::state::Msg;
 use crate::theme as t;
 use crate::util::*;
 use eframe::egui;
 use egui::{Margin, RichText, Rounding};
+use std::thread;
 
 /// A bulk action picked from the floating bar this frame.
 enum Bulk {
     Status(String),
     Priority(i64),
     Assignee(Option<String>),
-    Release(String),
+    /// Replace the release across the selection: Some(name) moves all into that
+    /// release (dropping any prior release label); None removes them from any.
+    SetRelease(Option<String>),
     Archive,
     Unarchive,
     Delete,
@@ -50,7 +55,7 @@ impl App {
                                     .color(p.text),
                             );
                             ui.separator();
-                            ui.menu_button("Status \u{25BE}", |ui| {
+                            ui.menu_button(format!("Status {}", t::ic::CARET_DOWN), |ui| {
                                 for s in &statuses {
                                     if ui.button(t::status_style(s).label).clicked() {
                                         act = Some(Bulk::Status(s.clone()));
@@ -58,7 +63,7 @@ impl App {
                                     }
                                 }
                             });
-                            ui.menu_button("Priority \u{25BE}", |ui| {
+                            ui.menu_button(format!("Priority {}", t::ic::CARET_DOWN), |ui| {
                                 for pr in 0..=4 {
                                     if ui.button(format!("P{pr}")).clicked() {
                                         act = Some(Bulk::Priority(pr));
@@ -66,7 +71,7 @@ impl App {
                                     }
                                 }
                             });
-                            ui.menu_button("Assignee \u{25BE}", |ui| {
+                            ui.menu_button(format!("Assignee {}", t::ic::CARET_DOWN), |ui| {
                                 if ui.button("Unassigned").clicked() {
                                     act = Some(Bulk::Assignee(None));
                                     ui.close_menu();
@@ -78,13 +83,18 @@ impl App {
                                     }
                                 }
                             });
-                            ui.menu_button("Release \u{25BE}", |ui| {
+                            ui.menu_button(format!("Release {}", t::ic::CARET_DOWN), |ui| {
+                                if ui.button(format!("{} Remove from release", t::ic::CLOSE)).clicked() {
+                                    act = Some(Bulk::SetRelease(None));
+                                    ui.close_menu();
+                                }
+                                ui.separator();
                                 if releases.is_empty() {
-                                    ui.label(RichText::new("No releases yet").weak());
+                                    ui.label(RichText::new("No releases yet — create one from a bead's detail").weak());
                                 }
                                 for r in &releases {
                                     if ui.button(format!("{} {r}", t::ic::RELEASE)).clicked() {
-                                        act = Some(Bulk::Release(r.clone()));
+                                        act = Some(Bulk::SetRelease(Some(r.clone())));
                                         ui.close_menu();
                                     }
                                 }
@@ -115,7 +125,7 @@ impl App {
             Some(Bulk::Priority(pr)) => self.bulk_update("--priority", &format!("P{pr}")),
             Some(Bulk::Assignee(Some(a))) => self.bulk_update("--assignee", &a),
             Some(Bulk::Assignee(None)) => self.bulk_update("--assignee", ""),
-            Some(Bulk::Release(r)) => self.bulk_label("add", &format!("{RELEASE_PREFIX}{r}")),
+            Some(Bulk::SetRelease(new)) => self.bulk_set_release(new),
             Some(Bulk::Archive) => self.bulk_archive(true),
             Some(Bulk::Unarchive) => self.bulk_archive(false),
             Some(Bulk::Delete) => self.confirm_bulk_delete = true,
@@ -186,6 +196,67 @@ impl App {
         args.extend(ids);
         args.push(label.to_string());
         self.run_cmd_optimistic("bd", args, None);
+        self.selected_ids.clear();
+    }
+
+    /// Replace the release across the selection: drop each bead's current
+    /// `release:` label, then add the new one (or just remove, for None).
+    /// Optimistic local patch + one background thread, like `set_release`.
+    pub(crate) fn bulk_set_release(&mut self, new: Option<String>) {
+        let ids = self.selected_vec();
+        if ids.is_empty() {
+            return;
+        }
+        // Current release per id (for targeted removal).
+        let current: Vec<(String, Option<String>)> = ids
+            .iter()
+            .map(|id| {
+                let cur = self
+                    .issues
+                    .iter()
+                    .find(|i| &i.id == id)
+                    .and_then(|i| release_of(i).map(str::to_string));
+                (id.clone(), cur)
+            })
+            .collect();
+        // Optimistic: drop any release label, add the new one.
+        let sel: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        for issue in self.issues.iter_mut().filter(|i| sel.contains(i.id.as_str())) {
+            issue.labels.retain(|l| !l.starts_with(RELEASE_PREFIX));
+            if let Some(n) = &new {
+                issue.labels.push(format!("{RELEASE_PREFIX}{n}"));
+            }
+        }
+        self.pending_mutations += 1;
+        let (tx, ctx, ws) = (self.tx.clone(), self.ctx.clone(), self.workspace.clone());
+        thread::spawn(move || {
+            let error = (|| {
+                // Remove prior labels, grouped by the release they carried.
+                let mut by_rel: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for (id, cur) in &current {
+                    if let Some(c) = cur {
+                        by_rel.entry(c.clone()).or_default().push(id.clone());
+                    }
+                }
+                for (rel, rel_ids) in by_rel {
+                    let mut args = vec!["label".to_string(), "remove".to_string()];
+                    args.extend(rel_ids);
+                    args.push(format!("{RELEASE_PREFIX}{rel}"));
+                    bd::run_cmd(&ws, "bd", &args)?;
+                }
+                if let Some(n) = &new {
+                    let mut args = vec!["label".to_string(), "add".to_string()];
+                    args.extend(current.iter().map(|(id, _)| id.clone()));
+                    args.push(format!("{RELEASE_PREFIX}{n}"));
+                    bd::run_cmd(&ws, "bd", &args)?;
+                }
+                Ok::<_, String>(())
+            })()
+            .err();
+            let _ = tx.send(Msg::Mutated { reselect: None, error, optimistic: true });
+            ctx.request_repaint();
+        });
         self.selected_ids.clear();
     }
 

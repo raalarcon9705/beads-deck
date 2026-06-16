@@ -8,6 +8,7 @@ mod lru;
 mod markdown;
 mod query;
 mod registry;
+mod schema;
 mod state;
 mod theme;
 mod util;
