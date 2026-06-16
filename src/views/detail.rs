@@ -331,7 +331,16 @@ pub(crate) fn detail_tab(ui: &mut egui::Ui, i: &Issue, md: &str, cache: &mut Com
     let mut nav: Option<String> = None;
     if !i.description.is_empty() {
         t::section(ui, "Description");
-        markdown::show(ui, cache, md);
+        // Cap the markdown to the panel width so paragraphs wrap and the vertical
+        // scroll stays correct; wide, non-wrapping content (tables, code blocks)
+        // gets its own horizontal scrollbar instead of overflowing the panel.
+        ui.set_max_width(ui.available_width());
+        egui::ScrollArea::horizontal()
+            .id_salt("desc_md_h")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                markdown::show(ui, cache, md);
+            });
     }
     t::section(ui, "Dependencies");
     if i.dependencies.is_empty() {
