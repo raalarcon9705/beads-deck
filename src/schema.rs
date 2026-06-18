@@ -30,6 +30,11 @@ pub struct WorkflowSchema {
     /// Label for the external-tracker key shown on cards/detail (e.g. "Jira").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref_label: Option<String>,
+    /// URL template for the external-tracker key, with `{key}` substituted by the
+    /// display key (e.g. `https://acme.atlassian.net/browse/{key}`). When set, the
+    /// ref on cards/detail becomes a clickable link that opens in the browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -111,6 +116,12 @@ impl WorkflowSchema {
     /// Label for the external-tracker key (e.g. "Jira"); defaults to "Ref".
     pub fn ref_label(&self) -> &str {
         self.external_ref_label.as_deref().unwrap_or("Ref")
+    }
+    /// Browser URL for a display key, from the `external_ref_url` template with
+    /// `{key}` substituted. None when no template is configured.
+    pub fn ref_url(&self, key: &str) -> Option<String> {
+        let tmpl = self.external_ref_url.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+        Some(tmpl.replace("{key}", key))
     }
 }
 

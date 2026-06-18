@@ -235,7 +235,13 @@ impl App {
                     editing_jira = false;
                 }
             } else if let Some(key) = external_key(&i) {
-                ui.label(RichText::new(key).size(t::FS_SMALL).strong().color(p.primary));
+                let text = RichText::new(&key).size(t::FS_SMALL).strong().color(p.primary);
+                if let Some(url) = crate::schema::wf().ref_url(&key) {
+                    ui.hyperlink_to(text, url)
+                        .on_hover_text(format!("Open {key} in browser"));
+                } else {
+                    ui.label(text);
+                }
                 if ui.button("Edit").on_hover_text("Edit key").clicked() {
                     jira_buf = i.external_ref.clone().unwrap_or_default();
                     editing_jira = true;

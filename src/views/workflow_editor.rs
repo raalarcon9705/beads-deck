@@ -69,6 +69,29 @@ impl App {
                     }
                 });
                 ui.add_space(t::SP_SM);
+
+                // External-tracker URL template (`{key}` is replaced by the key).
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("External-tracker URL:").color(p.text_sub));
+                    let mut url = self.editing_schema.external_ref_url.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut url)
+                                .hint_text("e.g. https://acme.atlassian.net/browse/{key}")
+                                .desired_width(360.0),
+                        )
+                        .changed()
+                    {
+                        self.editing_schema.external_ref_url =
+                            (!url.trim().is_empty()).then(|| url.trim().to_string());
+                    }
+                });
+                ui.label(
+                    RichText::new("Use {key} where the ref goes — makes the ref clickable.")
+                        .size(t::FS_CAPTION)
+                        .color(p.text_sub),
+                );
+                ui.add_space(t::SP_SM);
                 ui.separator();
 
                 egui::ScrollArea::vertical()

@@ -157,6 +157,10 @@ impl App {
         // `id_rect` captures the clickable id label's rect so the full-card
         // overlay below can detect (and prioritize) a click on the id.
         let mut id_rect = egui::Rect::NOTHING;
+        // `ref_rect`/`ref_url` capture the external-ref link so the full-card
+        // overlay can detect a click on it and open the tracker URL instead.
+        let mut ref_rect = egui::Rect::NOTHING;
+        let mut ref_url: Option<String> = None;
         let opacity = if is_being_dragged { 0.35 } else { 1.0 };
         let card_resp = ui.add_enabled_ui(true, |ui| {
             ui.set_opacity(opacity);
@@ -182,11 +186,19 @@ impl App {
                     ui.label(RichText::new(glyph).color(tc));
                     id_rect = t::copyable_id(ui, &i.id, t::FS_CAPTION).rect;
                     if let Some(key) = external_key(i) {
-                        ui.label(
-                            RichText::new(format!("{} {key}", crate::schema::wf().ref_label()))
-                                .size(t::FS_CAPTION)
-                                .color(p.primary),
-                        );
+                        let wf = crate::schema::wf();
+                        let text = RichText::new(format!("{} {key}", wf.ref_label()))
+                            .size(t::FS_CAPTION)
+                            .color(p.primary);
+                        if let Some(url) = wf.ref_url(&key) {
+                            ref_rect = ui
+                                .hyperlink_to(text, &url)
+                                .on_hover_text(format!("Open {key} in browser"))
+                                .rect;
+                            ref_url = Some(url);
+                        } else {
+                            ui.label(text);
+                        }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(a) = i.assignee.as_deref().filter(|a| !a.is_empty()) {
@@ -213,6 +225,14 @@ impl App {
                     .interact_pointer_pos()
                     .is_some_and(|pos| id_rect.contains(pos))
         };
+        // A click on the external-ref link opens the tracker URL in the browser,
+        // taking priority over the full-card overlay (which would open detail).
+        let clicked_ref = |resp: &egui::Response| {
+            resp.clicked()
+                && resp
+                    .interact_pointer_pos()
+                    .is_some_and(|pos| ref_rect.contains(pos))
+        };
 
         // In select mode the card is a selection target, not draggable: a click
         // anywhere on it toggles membership in the bulk selection.
@@ -224,6 +244,10 @@ impl App {
             );
             if clicked_id(&resp) {
                 t::copy_id_to_clipboard(ui, &i.id);
+                return None;
+            }
+            if let Some(url) = ref_url.as_ref().filter(|_| clicked_ref(&resp)) {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                 return None;
             }
             return resp.clicked().then_some(RowAction::Toggle);
@@ -241,6 +265,11 @@ impl App {
         // a drag is a press+move, not a click).
         if clicked_id(&drag_resp) {
             t::copy_id_to_clipboard(ui, &i.id);
+            return None;
+        }
+
+        if let Some(url) = ref_url.as_ref().filter(|_| clicked_ref(&drag_resp)) {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             return None;
         }
 
